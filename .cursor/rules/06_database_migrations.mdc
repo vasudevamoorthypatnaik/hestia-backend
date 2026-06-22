@@ -1,0 +1,1106 @@
+---
+description: Flyway database migration guidelines and safe patterns
+alwaysApply: true
+---
+
+# Database Migration Guidelines — Authoritative
+
+**Audience:** Cursor (entry-level engineer), human developers
+**Role Perspective:** Senior Staff Database Engineer
+**Scope:** Flyway migrations, schema evolution, data migrations, rollback strategies
+**Primary Goal:** Safe, reversible, zero-downtime database changes
+
+---
+
+## 0. Technology Stack (NON-NEGOTIABLE)
+
+- **Migration Tool:** Flyway (latest stable)
+- **Database:** PostgreSQL 16.x
+- **Migration Location:** `src/main/resources/db/migration/`
+- **Naming Pattern:** `V{version}__{description}.sql` (e.g., `V001__create_users_table.sql`)
+- **Versioning:** Sequential integer versions (`V001`, `V002`, `V003`, ...)
+- **Testing:** Testcontainers PostgreSQL (integration tests validate migrations)
+
+If any tool or pattern is unclear → **STOP AND ASK**.
+
+---
+
+## 1. Core Principles (NON-NEGOTIABLE)
+
+1. **Migrations are Immutable:** Once a migration is committed to `main`, it MUST NOT be modified.
+2. **Migrations are Sequential:** Versions must be sequential integers (`V001`, `V002`, ...).
+3. **Migrations are Idempotent:** Running the same migration twice should not fail (use `IF NOT EXISTS`, `IF EXISTS`).
+4. **Migrations are Reversible:** Every destructive change must have a documented rollback strategy.
+5. **Migrations are Tested Locally:** All migrations MUST pass integration tests with Testcontainers before commit.
+6. **Never Drop Tables/Columns in Production:** Use deprecation → data migration → drop workflow.
+
+Violating these principles risks data loss and production outages.
+
+---
+
+## 2. Migration File Naming (MANDATORY)
+
+### 2.1 Naming Pattern
+
+**Format:**
+```
+V{version}__{description}.sql
+```
+
+**Rules:**
+- `{version}`: Zero-padded 3-digit integer (`001`, `002`, `003`, ...)
+- `__`: Double underscore separator (Flyway requirement)
+- `{description}`: Lowercase snake_case, descriptive, max 50 characters
+- `.sql`: File extension
+
+**Examples:**
+
+✅ **GOOD:**
+```
+V001__create_users_table.sql
+V002__add_users_email_index.sql
+V003__create_events_table.sql
+V004__add_events_max_attendees_column.sql
+V005__migrate_legacy_user_data.sql
+```
+
+❌ **BAD:**
+```
+V1__create_users_table.sql          # Wrong: version not zero-padded
+V002_add_users_email_index.sql      # Wrong: single underscore
+V003__CreateEventsTable.sql         # Wrong: PascalCase description
+V004__add-events-max-attendees.sql  # Wrong: hyphens instead of underscores
+```
+
+### 2.2 Version Numbering Rules
+
+**Sequential Integers:**
+- Start at `V001`
+- Increment by 1 for each new migration
+- Never skip versions
+- Never reuse versions
+
+**Handling Multiple Developers:**
+- If two developers create `V010` at the same time, the second one must rename to `V011` during merge
+- Use git to detect version conflicts early
+
+**Out-of-Order Migrations (AVOID):**
+- Flyway supports out-of-order migrations, but this complicates tracking
+- **Policy:** Do NOT use out-of-order migrations unless explicitly required
+
+---
+
+## 3. Migration File Structure (RECOMMENDED)
+
+### 3.1 Template
+
+Every migration should follow this structure:
+
+```sql
+-- Migration: V{version}__{description}
+-- Description: {1-2 sentence explanation of what this migration does}
+-- Author: {GitHub username or team}
+-- Date: {YYYY-MM-DD}
+-- Jira/Ticket: {TICKET-123} (optional)
+
+-- =====================================================
+-- MIGRATION START
+-- =====================================================
+
+-- {SQL statements here}
+
+-- =====================================================
+-- MIGRATION END
+-- =====================================================
+
+-- Rollback Strategy:
+-- {Describe how to rollback this migration if needed}
+-- Example: DROP TABLE IF EXISTS users;
+```
+
+**Example:**
+
+```sql
+-- Migration: V001__create_users_table
+-- Description: Creates the users table with core fields (id, email, name, timestamps)
+-- Author: vasu
+-- Date: 2025-02-15
+
+-- =====================================================
+-- MIGRATION START
+-- =====================================================
+
+CREATE TABLE IF NOT EXISTS users (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    email VARCHAR(255) NOT NULL UNIQUE,
+    first_name VARCHAR(100) NOT NULL,
+    last_name VARCHAR(100) NOT NULL,
+    phone_number VARCHAR(20),
+    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+CREATE INDEX IF NOT EXISTS idx_users_created_at ON users(created_at);
+
+-- =====================================================
+-- MIGRATION END
+-- =====================================================
+
+-- Rollback Strategy:
+-- DROP TABLE IF EXISTS users;
+```
+
+---
+
+## 4. Safe Migration Patterns (CRITICAL)
+
+### 4.1 Schema Changes (DDL)
+
+#### ✅ Adding a Table
+
+**Safe Pattern:**
+```sql
+CREATE TABLE IF NOT EXISTS events (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    title VARCHAR(200) NOT NULL,
+    description TEXT,
+    start_time TIMESTAMP NOT NULL,
+    end_time TIMESTAMP NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_events_start_time ON events(start_time);
+```
+
+**Why Safe:**
+- `IF NOT EXISTS` prevents failure if table exists
+- Indexes created immediately (no downtime)
+
+---
+
+#### ✅ Adding a Column (Nullable)
+
+**Safe Pattern:**
+```sql
+ALTER TABLE users
+ADD COLUMN IF NOT EXISTS profile_image_url VARCHAR(500);
+```
+
+**Why Safe:**
+- Adding nullable column is non-blocking (no default value required)
+- Existing rows get `NULL` for new column
+- Application can handle `NULL` gracefully
+
+**Rollback:**
+```sql
+ALTER TABLE users DROP COLUMN IF EXISTS profile_image_url;
+```
+
+---
+
+#### ❌ Adding a Column (NOT NULL without default) — UNSAFE
+
+**Unsafe Pattern:**
+```sql
+-- ❌ DON'T DO THIS
+ALTER TABLE users
+ADD COLUMN organization_id UUID NOT NULL;  -- FAILS if table has existing rows
+```
+
+**Why Unsafe:**
+- PostgreSQL requires a value for `NOT NULL` columns
+- Will fail if table has existing rows
+
+**Safe Alternative (Two-Step):**
+
+**Step 1: Add nullable column with default**
+```sql
+-- V010__add_users_organization_id.sql
+ALTER TABLE users
+ADD COLUMN IF NOT EXISTS organization_id UUID DEFAULT NULL;
+```
+
+**Step 2: Backfill data + add NOT NULL constraint**
+```sql
+-- V011__backfill_users_organization_id.sql
+-- Backfill existing rows (business logic determines default org)
+UPDATE users
+SET organization_id = '00000000-0000-0000-0000-000000000000'  -- Default org UUID
+WHERE organization_id IS NULL;
+
+-- Now safe to add NOT NULL constraint
+ALTER TABLE users
+ALTER COLUMN organization_id SET NOT NULL;
+```
+
+---
+
+#### ✅ Renaming a Column (Zero-Downtime Pattern)
+
+**Problem:** Renaming a column breaks running application code.
+
+**Safe Pattern (3 steps):**
+
+**Step 1: Add new column**
+```sql
+-- V020__add_users_full_name.sql
+ALTER TABLE users
+ADD COLUMN IF NOT EXISTS full_name VARCHAR(200);
+
+-- Backfill from existing columns
+UPDATE users
+SET full_name = CONCAT(first_name, ' ', last_name)
+WHERE full_name IS NULL;
+```
+
+**Step 2: Deploy application code to use BOTH columns**
+- Application writes to `first_name`, `last_name`, AND `full_name`
+- Application reads from `full_name` (new column)
+
+**Step 3: Drop old columns**
+```sql
+-- V021__drop_users_first_last_name.sql
+-- Only run after application deployment is complete
+ALTER TABLE users DROP COLUMN IF EXISTS first_name;
+ALTER TABLE users DROP COLUMN IF EXISTS last_name;
+```
+
+**Why Safe:**
+- No downtime (old and new columns coexist temporarily)
+- Application can be deployed gradually
+
+---
+
+#### ❌ Dropping a Column — UNSAFE (in production)
+
+**Unsafe Pattern:**
+```sql
+-- ❌ DON'T DO THIS in production
+ALTER TABLE users DROP COLUMN phone_number;
+```
+
+**Why Unsafe:**
+- Running application may still be reading `phone_number`
+- Causes immediate application errors
+
+**Safe Pattern (Deprecation Workflow):**
+
+**Step 1: Stop writing to column (deploy application change)**
+- Remove code that writes to `phone_number`
+
+**Step 2: Wait 7 days (ensure no reads)**
+- Monitor application logs to confirm no reads of `phone_number`
+
+**Step 3: Drop column**
+```sql
+-- V030__drop_users_phone_number.sql
+ALTER TABLE users DROP COLUMN IF EXISTS phone_number;
+```
+
+---
+
+#### ❌ Dropping a Table — UNSAFE (in production)
+
+**Never drop tables in production without following deprecation workflow.**
+
+**Safe Pattern:**
+
+**Step 1: Deploy application code to stop using table**
+- Remove all references to table
+
+**Step 2: Rename table (soft delete)**
+```sql
+-- V040__deprecate_legacy_sessions_table.sql
+ALTER TABLE sessions RENAME TO sessions_deprecated;
+```
+
+**Step 3: Wait 30 days, then drop**
+```sql
+-- V041__drop_deprecated_sessions_table.sql
+DROP TABLE IF EXISTS sessions_deprecated;
+```
+
+---
+
+### 4.2 Data Migrations (DML)
+
+#### ✅ Backfilling Data (Safe Pattern)
+
+**Example: Backfill missing `organization_id` for existing users**
+
+```sql
+-- V050__backfill_users_organization_id.sql
+
+-- Create default organization if it doesn't exist
+INSERT INTO organizations (id, name, created_at, updated_at)
+VALUES (
+    '00000000-0000-0000-0000-000000000000',
+    'Default Organization',
+    NOW(),
+    NOW()
+)
+ON CONFLICT (id) DO NOTHING;  -- Idempotent: won't fail if org exists
+
+-- Backfill users with NULL organization_id
+UPDATE users
+SET organization_id = '00000000-0000-0000-0000-000000000000'
+WHERE organization_id IS NULL;
+```
+
+**Why Safe:**
+- `ON CONFLICT DO NOTHING` makes it idempotent
+- `WHERE organization_id IS NULL` prevents re-processing
+
+**Performance Note:**
+- For large tables (>100k rows), use batched updates:
+
+```sql
+-- Batched update (10k rows at a time)
+DO $$
+DECLARE
+    batch_size INT := 10000;
+    rows_updated INT;
+BEGIN
+    LOOP
+        UPDATE users
+        SET organization_id = '00000000-0000-0000-0000-000000000000'
+        WHERE id IN (
+            SELECT id FROM users
+            WHERE organization_id IS NULL
+            LIMIT batch_size
+        );
+
+        GET DIAGNOSTICS rows_updated = ROW_COUNT;
+        EXIT WHEN rows_updated = 0;
+
+        RAISE NOTICE 'Updated % rows', rows_updated;
+        COMMIT;  -- Commit each batch
+    END LOOP;
+END $$;
+```
+
+---
+
+#### ✅ Fixing Corrupted Data (Safe Pattern)
+
+**Example: Normalize email addresses to lowercase**
+
+```sql
+-- V060__normalize_users_email.sql
+
+UPDATE users
+SET email = LOWER(email)
+WHERE email != LOWER(email);  -- Only update rows that need fixing
+```
+
+**Why Safe:**
+- `WHERE` clause prevents unnecessary updates
+- Idempotent (can be run multiple times)
+
+---
+
+### 4.3 Index Migrations
+
+#### ✅ Adding an Index (Safe Pattern)
+
+**For Small Tables (<100k rows):**
+```sql
+CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+```
+
+**For Large Tables (>100k rows) — Use CONCURRENTLY:**
+```sql
+-- V070__add_users_email_index.sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_users_email ON users(email);
+```
+
+**Why Safe:**
+- `CONCURRENTLY` allows reads/writes while index is built
+- No table lock
+
+**Note:**
+- `CREATE INDEX CONCURRENTLY` cannot run inside a transaction
+- Flyway supports this (disable transactional migrations for this file)
+
+**Flyway Config (for CONCURRENTLY):**
+```sql
+-- Add this comment at the top of migration file:
+-- flyway:transaction=false
+```
+
+---
+
+#### ✅ Dropping an Index (Safe Pattern)
+
+```sql
+DROP INDEX CONCURRENTLY IF EXISTS idx_users_phone_number;
+```
+
+**Why Safe:**
+- `CONCURRENTLY` prevents table lock
+- `IF EXISTS` prevents failure if index doesn't exist
+
+---
+
+### 4.4 Constraint Migrations
+
+#### ✅ Adding a Foreign Key (Safe Pattern)
+
+**Small Tables:**
+```sql
+ALTER TABLE events
+ADD CONSTRAINT fk_events_user_id
+FOREIGN KEY (user_id) REFERENCES users(id)
+ON DELETE CASCADE;
+```
+
+**Large Tables (avoid downtime):**
+```sql
+-- Step 1: Add NOT VALID constraint (no validation, fast)
+ALTER TABLE events
+ADD CONSTRAINT fk_events_user_id
+FOREIGN KEY (user_id) REFERENCES users(id)
+ON DELETE CASCADE
+NOT VALID;  -- Don't validate existing rows
+
+-- Step 2: Validate constraint (can take time, but non-blocking)
+ALTER TABLE events
+VALIDATE CONSTRAINT fk_events_user_id;
+```
+
+**Why Safe:**
+- `NOT VALID` adds constraint without validating existing rows (fast)
+- `VALIDATE CONSTRAINT` validates in background (non-blocking)
+
+---
+
+#### ✅ Adding a Unique Constraint (Safe Pattern)
+
+**Safe Pattern:**
+```sql
+-- V080__add_users_email_unique.sql
+
+-- Step 1: Identify duplicates
+SELECT email, COUNT(*)
+FROM users
+GROUP BY email
+HAVING COUNT(*) > 1;
+-- If duplicates exist, fix them first (separate data migration)
+
+-- Step 2: Add unique constraint
+ALTER TABLE users
+ADD CONSTRAINT users_email_unique UNIQUE (email);
+```
+
+**Why Safe:**
+- Check for duplicates BEFORE adding constraint
+- Fix duplicates in separate data migration if needed
+
+---
+
+## 5. Rollback Strategies (CRITICAL)
+
+### 5.1 Rollback Principles
+
+**Every migration MUST document its rollback strategy.**
+
+**Rollback Documentation Template:**
+```sql
+-- Rollback Strategy:
+-- 1. {Step 1 description}
+-- 2. {Step 2 description}
+-- SQL:
+-- {Rollback SQL statements}
+```
+
+**Example:**
+```sql
+-- Rollback Strategy:
+-- 1. Drop the newly created table
+-- SQL:
+-- DROP TABLE IF EXISTS events;
+```
+
+---
+
+### 5.2 Rollback Patterns
+
+#### Schema Rollback (DDL)
+
+**Add Table:**
+```sql
+-- Rollback: DROP TABLE IF EXISTS events;
+```
+
+**Add Column:**
+```sql
+-- Rollback: ALTER TABLE users DROP COLUMN IF EXISTS profile_image_url;
+```
+
+**Add Index:**
+```sql
+-- Rollback: DROP INDEX IF EXISTS idx_users_email;
+```
+
+---
+
+#### Data Rollback (DML)
+
+**Data migrations are HARDER to rollback.**
+
+**Pattern:** Take a snapshot before data migration.
+
+**Example:**
+```sql
+-- V090__migrate_legacy_user_status.sql
+
+-- Step 1: Create backup table
+CREATE TABLE users_backup_v090 AS SELECT * FROM users;
+
+-- Step 2: Perform data migration
+UPDATE users SET status = 'active' WHERE status IS NULL;
+
+-- Rollback Strategy:
+-- 1. Restore from backup table
+-- SQL:
+-- UPDATE users SET status = users_backup_v090.status FROM users_backup_v090 WHERE users.id = users_backup_v090.id;
+-- DROP TABLE users_backup_v090;
+```
+
+**Warning:**
+- Backup tables consume disk space
+- Only use for critical data migrations
+- Drop backup table after 30 days
+
+---
+
+## 6. Local Testing (MANDATORY)
+
+### 6.1 Integration Test Requirements
+
+**Every migration MUST be validated by integration tests before commit.**
+
+**Pattern:**
+
+```java
+@SpringBootTest
+@Testcontainers
+class FlywayMigrationIT {
+
+    @Container
+    static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:16-alpine")
+        .withDatabaseName("hestia_test")
+        .withUsername("test")
+        .withPassword("test");
+
+    @DynamicPropertySource
+    static void configureProperties(DynamicPropertyRegistry registry) {
+        registry.add("spring.datasource.url", postgres::getJdbcUrl);
+        registry.add("spring.datasource.username", postgres::getUsername);
+        registry.add("spring.datasource.password", postgres::getPassword);
+    }
+
+    @Autowired
+    private Flyway flyway;
+
+    @Test
+    void migrationsApplyCleanly() {
+        // This test ensures all migrations apply successfully to a fresh database
+        assertThat(flyway.info().applied()).hasSize(expectedMigrationCount);
+    }
+
+    @Test
+    void migrationsAreIdempotent() {
+        // This test ensures migrations can be re-applied (for local dev workflows)
+        flyway.clean();
+        flyway.migrate();
+
+        // Re-apply migrations (should not fail)
+        flyway.clean();
+        flyway.migrate();
+
+        assertThat(flyway.info().applied()).hasSize(expectedMigrationCount);
+    }
+}
+```
+
+**What This Tests:**
+- ✅ Migrations apply cleanly on fresh database
+- ✅ No syntax errors
+- ✅ No checksum drift
+- ✅ Idempotency (can re-apply migrations)
+
+---
+
+### 6.2 Local Migration Workflow
+
+**Before committing a new migration:**
+
+1. **Create migration file:**
+   ```bash
+   touch src/main/resources/db/migration/V010__add_users_organization_id.sql
+   ```
+
+2. **Write migration SQL:**
+   - Follow naming conventions
+   - Use `IF NOT EXISTS` / `IF EXISTS`
+   - Document rollback strategy
+
+3. **Run integration tests:**
+   ```bash
+   mvn -P it verify
+   ```
+
+4. **Verify migration applies:**
+   - Check Testcontainers logs for migration success
+   - Verify no errors
+
+5. **Commit migration:**
+   ```bash
+   git add src/main/resources/db/migration/V010__add_users_organization_id.sql
+   git commit -m "feat: add organization_id to users table"
+   ```
+
+---
+
+## 7. Production Migration Workflow (CRITICAL)
+
+### 7.1 Pre-Deployment Checklist
+
+Before deploying migrations to production:
+
+- [ ] Migration tested locally with Testcontainers
+- [ ] Integration tests pass
+- [ ] Rollback strategy documented
+- [ ] Migration reviewed by another engineer
+- [ ] Database backup taken (manual RDS snapshot)
+- [ ] Low-traffic window scheduled (if migration is slow)
+
+---
+
+### 7.2 Deployment Steps
+
+**Step 1: Take Database Backup**
+```bash
+# Create manual RDS snapshot
+aws rds create-db-snapshot \
+  --db-instance-identifier hestia-prod-db \
+  --db-snapshot-identifier hestia-prod-pre-deploy-$(date +%Y%m%d)
+```
+
+**Step 2: Deploy Application (Flyway runs automatically)**
+- Flyway runs migrations on application startup
+- Monitor application logs for migration success
+
+**Step 3: Verify Migration Applied**
+```sql
+-- Query Flyway schema history table
+SELECT * FROM flyway_schema_history ORDER BY installed_rank DESC LIMIT 5;
+```
+
+**Step 4: Monitor Application Health**
+- Check CloudWatch logs for errors
+- Verify ALB health checks pass
+
+---
+
+### 7.3 Rollback Procedure (If Migration Fails)
+
+**Step 1: Identify Failed Migration**
+```sql
+SELECT * FROM flyway_schema_history WHERE success = false;
+```
+
+**Step 2: Restore Database from Snapshot**
+```bash
+# Restore RDS from snapshot
+aws rds restore-db-instance-from-db-snapshot \
+  --db-instance-identifier hestia-prod-db-restored \
+  --db-snapshot-identifier hestia-prod-pre-deploy-20250215
+```
+
+**Step 3: Update Application to Point to Restored Database**
+- Update SSM parameter `/hestia/prod/db/host` to new RDS endpoint
+- Restart EC2 instances
+
+**Downtime:** ~10-15 minutes (database restore time)
+
+---
+
+## 8. Seed Data for Dev Environment (RECOMMENDED)
+
+### 8.1 Purpose
+
+**Seed data provides:**
+- Realistic test data for local development
+- Consistent dev environment state
+- Example data for UI development
+
+---
+
+### 8.2 Seed Data Location
+
+**Path:** `src/main/resources/db/seed/`
+
+**Files:**
+```
+src/main/resources/db/seed/
+├── V900__seed_dev_users.sql
+├── V901__seed_dev_events.sql
+├── V902__seed_dev_invitations.sql
+```
+
+**Naming:**
+- Use `V9xx` prefix to run AFTER schema migrations
+- Use `seed_dev_` prefix to indicate dev-only data
+
+---
+
+### 8.3 Seed Data Pattern
+
+**Example: Seed Dev Users**
+
+```sql
+-- V900__seed_dev_users.sql
+-- Description: Seed test users for dev environment
+-- ONLY runs in dev environment (controlled by Flyway profile)
+
+-- Check if running in dev environment
+DO $$
+BEGIN
+    IF current_database() != 'hestia_dev' THEN
+        RAISE EXCEPTION 'Seed data should only run in dev environment';
+    END IF;
+END $$;
+
+-- Seed users (idempotent with ON CONFLICT)
+INSERT INTO users (id, email, first_name, last_name, created_at, updated_at)
+VALUES
+    ('00000000-0000-0000-0000-000000000001', 'alice@example.com', 'Alice', 'Smith', NOW(), NOW()),
+    ('00000000-0000-0000-0000-000000000002', 'bob@example.com', 'Bob', 'Jones', NOW(), NOW()),
+    ('00000000-0000-0000-0000-000000000003', 'charlie@example.com', 'Charlie', 'Brown', NOW(), NOW())
+ON CONFLICT (email) DO NOTHING;  -- Idempotent: won't fail if users exist
+```
+
+**Example: Seed Dev Events**
+
+```sql
+-- V901__seed_dev_events.sql
+-- Description: Seed test events for dev environment
+
+-- Check if running in dev environment
+DO $$
+BEGIN
+    IF current_database() != 'hestia_dev' THEN
+        RAISE EXCEPTION 'Seed data should only run in dev environment';
+    END IF;
+END $$;
+
+-- Seed events
+INSERT INTO events (id, title, description, start_time, end_time, user_id, created_at, updated_at)
+VALUES
+    (
+        '10000000-0000-0000-0000-000000000001',
+        'Birthday Party',
+        'Alice''s 30th birthday celebration',
+        NOW() + INTERVAL '7 days',
+        NOW() + INTERVAL '7 days' + INTERVAL '4 hours',
+        '00000000-0000-0000-0000-000000000001',
+        NOW(),
+        NOW()
+    ),
+    (
+        '10000000-0000-0000-0000-000000000002',
+        'Team Lunch',
+        'Monthly team lunch at downtown restaurant',
+        NOW() + INTERVAL '14 days',
+        NOW() + INTERVAL '14 days' + INTERVAL '2 hours',
+        '00000000-0000-0000-0000-000000000002',
+        NOW(),
+        NOW()
+    )
+ON CONFLICT (id) DO NOTHING;
+```
+
+---
+
+### 8.4 Flyway Configuration (Dev vs Prod)
+
+**application-dev.yml:**
+```yaml
+spring:
+  flyway:
+    locations: classpath:db/migration,classpath:db/seed  # Include seed data
+    clean-disabled: false  # Allow Flyway clean in dev
+```
+
+**application-prod.yml:**
+```yaml
+spring:
+  flyway:
+    locations: classpath:db/migration  # Exclude seed data
+    clean-disabled: true  # Prevent accidental data loss
+```
+
+**Why:**
+- Dev environment includes seed data (`classpath:db/seed`)
+- Prod environment excludes seed data (only runs schema migrations)
+- `clean-disabled: true` prevents `flyway.clean()` in production
+
+---
+
+### 8.5 Running Seed Data Locally
+
+**Option 1: Automatic (on application startup)**
+```bash
+# Start Spring Boot app with dev profile
+mvn spring-boot:run -Dspring-boot.run.profiles=dev
+```
+
+**Option 2: Manual (reset database with seed data)**
+```bash
+# Clean and migrate (includes seed data)
+mvn flyway:clean flyway:migrate -P dev
+```
+
+---
+
+## 9. Common Migration Mistakes (AVOID)
+
+### ❌ Mistake 1: Modifying Committed Migrations
+
+**Wrong:**
+```bash
+# Migration already committed to main
+V010__add_users_organization_id.sql
+
+# Developer modifies V010 to add another column
+ALTER TABLE users ADD COLUMN organization_id UUID;
+ALTER TABLE users ADD COLUMN role VARCHAR(50);  # Added later
+```
+
+**Why Wrong:**
+- Flyway tracks checksums
+- Modifying committed migration causes checksum mismatch
+- Breaks deployments
+
+**Correct:**
+```bash
+# Create NEW migration
+V011__add_users_role.sql
+ALTER TABLE users ADD COLUMN IF NOT EXISTS role VARCHAR(50);
+```
+
+---
+
+### ❌ Mistake 2: Skipping Version Numbers
+
+**Wrong:**
+```
+V001__create_users_table.sql
+V002__create_events_table.sql
+V005__add_users_email_index.sql  # Skipped V003, V004
+```
+
+**Why Wrong:**
+- Creates confusion
+- Suggests missing migrations
+
+**Correct:**
+```
+V001__create_users_table.sql
+V002__create_events_table.sql
+V003__add_users_email_index.sql  # Sequential
+```
+
+---
+
+### ❌ Mistake 3: Not Using Idempotent Patterns
+
+**Wrong:**
+```sql
+CREATE TABLE users (...);  # Fails if table exists
+```
+
+**Correct:**
+```sql
+CREATE TABLE IF NOT EXISTS users (...);  # Idempotent
+```
+
+---
+
+### ❌ Mistake 4: Mixing Schema and Data Migrations
+
+**Wrong:**
+```sql
+-- V010__create_events_and_seed_data.sql
+CREATE TABLE events (...);
+INSERT INTO events (...) VALUES (...);  # Mixing schema + data
+```
+
+**Why Wrong:**
+- Schema and data migrations have different rollback strategies
+- Hard to separate concerns
+
+**Correct:**
+```sql
+-- V010__create_events_table.sql
+CREATE TABLE IF NOT EXISTS events (...);
+
+-- V011__seed_initial_events.sql (separate migration)
+INSERT INTO events (...) VALUES (...) ON CONFLICT DO NOTHING;
+```
+
+---
+
+## 10. Cursor Operating Rules (CRITICAL)
+
+**Cursor MUST:**
+- Follow sequential version numbering (`V001`, `V002`, ...)
+- Use idempotent patterns (`IF NOT EXISTS`, `IF EXISTS`, `ON CONFLICT`)
+- Document rollback strategy in every migration
+- Use safe patterns for schema changes (add nullable columns, avoid dropping)
+- Test migrations locally with Testcontainers before committing
+- Never modify committed migrations
+
+**Cursor MUST NOT:**
+- Skip version numbers
+- Drop tables/columns without deprecation workflow
+- Modify committed migrations
+- Mix schema and data migrations
+- Forget to document rollback strategy
+
+**When in doubt → STOP AND ASK.**
+
+---
+
+## 11. Domain README Documentation (MANDATORY)
+
+**Each domain MUST document database schema changes in its `README.md` file.**
+
+### 11.1 Purpose
+
+Domain READMEs must include:
+- **Database schema** (tables, columns, indexes, constraints)
+- **Migration history** (all Flyway migrations for this domain)
+- **Rationale** for schema design decisions
+
+### 11.2 Location
+
+**Pattern:**
+```
+src/main/java/com/hestia/[domain]/README.md
+```
+
+**Example:**
+```
+src/main/java/com/hestia/event/README.md
+```
+
+### 11.3 Database Schema Section
+
+Every domain README should include a **Database Schema** section:
+
+```markdown
+## Database Schema
+
+**Tables:**
+
+### `events`
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| id | UUID | PRIMARY KEY | Event ID |
+| title | VARCHAR(200) | NOT NULL | Event title |
+| description | TEXT | | Event description |
+| start_time | TIMESTAMP | NOT NULL | Event start time |
+| end_time | TIMESTAMP | NOT NULL | Event end time |
+| created_at | TIMESTAMP | NOT NULL, DEFAULT NOW() | Creation timestamp |
+| updated_at | TIMESTAMP | NOT NULL, DEFAULT NOW() | Last update timestamp |
+
+**Indexes:**
+- `idx_events_start_time`: Index on `start_time` for date-based queries
+- `idx_events_created_at`: Index on `created_at` for sorting
+
+**Constraints:**
+- `check_events_end_after_start`: `end_time > start_time`
+
+**Migrations:**
+- `V003__create_events_table.sql` - Initial table creation
+- `V012__add_events_max_attendees_column.sql` - Added max_attendees field
+- `V025__add_events_start_time_index.sql` - Performance optimization
+
+## Schema Design Decisions
+
+### Decision: Why separate `start_time` and `end_time` instead of duration?
+**Date:** 2025-02-15
+**Rationale:** Events have explicit start and end times (e.g., "6:00 PM - 9:00 PM"), not durations. Storing both timestamps makes querying for events in a time range simpler.
+**Trade-off:** Requires `CHECK` constraint to ensure `end_time > start_time`.
+```
+
+### 11.4 Migration History Section
+
+Document all migrations related to this domain:
+
+```markdown
+## Migration History
+
+### V003__create_events_table.sql (2025-02-01)
+**Purpose:** Initial event table creation
+**Changes:** Created `events` table with core fields
+**Rollback:** `DROP TABLE IF EXISTS events;`
+
+### V012__add_events_max_attendees_column.sql (2025-02-10)
+**Purpose:** Support capacity limits for events
+**Changes:** Added nullable `max_attendees INT` column
+**Rationale:** Some events have capacity limits (e.g., "max 50 guests")
+**Rollback:** `ALTER TABLE events DROP COLUMN IF EXISTS max_attendees;`
+
+### V025__add_events_start_time_index.sql (2025-02-15)
+**Purpose:** Performance optimization for date-based queries
+**Changes:** Created index on `start_time` column
+**Impact:** Query performance improved from 500ms to 50ms for date range filters
+**Rollback:** `DROP INDEX IF EXISTS idx_events_start_time;`
+```
+
+### 11.5 When to Update Domain README
+
+**ALWAYS update the domain README when:**
+
+1. **Adding new tables:**
+   - Document table structure (columns, types, constraints)
+   - Document indexes
+   - Document foreign keys
+
+2. **Modifying schema:**
+   - Add migration to migration history section
+   - Document rationale for change
+   - Document rollback strategy
+
+3. **Performance optimizations:**
+   - Document index additions
+   - Document query performance improvements
+
+4. **Schema design decisions:**
+   - Document "why" choices were made
+   - Document trade-offs considered
+
+### 11.6 Pre-Commit Reminder
+
+The `.githooks/pre-commit-governance-check` hook will remind you to update domain READMEs before committing.
+
+**Why this matters:**
+- Future developers understand schema evolution
+- Migration history is documented alongside code
+- "Why" decisions are captured, not just "what" schema
+
+---
+
+## Final Database Migration Principle
+
+> Migrations are immutable, sequential, and reversible. Treat production data with extreme care.
+
+If a migration risks data loss or production downtime without clear mitigation, it must be rejected.
+
+> **Domain READMEs document schema evolution.** Every migration should be documented in the domain's README with rationale and rollback strategy.

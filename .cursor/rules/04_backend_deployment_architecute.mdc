@@ -1,0 +1,428 @@
+---
+description: AWS deployment architecture – blue-green EC2 with Elastic IP swap
+alwaysApply: true
+---
+
+# Deployment Architecture – Blue-Green EC2 with Elastic IP Swap
+
+This document defines the AWS deployment architecture for the Hestia Application backend.
+
+**Architecture Decision:** Blue-green EC2 deployment with Elastic IP swap. Each deploy creates a fresh EC2 instance, health-checks it, swaps the EIP, and terminates the old instance. Dirty state is structurally impossible.
+
+**Cross-reference:** See `.cursor/rules/02_backend_architecutre_stack.mdc` for complete AWS platform components and cost analysis.
+
+---
+
+# Configuration Boundary: Deploy Scripts vs Application Config (NON-NEGOTIABLE)
+
+**Rule:** Deploy scripts (`deploy.sh`, `blue-green-deploy.sh`, `local-deploy.sh`) handle **infrastructure concerns only**. Application-specific configuration belongs in **Spring config files** (`application.yml`, `application-prod.yml`, `application-dev.yml`).
+
+| Belongs in deploy scripts | Belongs in Spring config files |
+|--------------------------|-------------------------------|
+| Docker image tag, ECR registry | Business rule limits (event limits, guest limits) |
+| AWS region, instance type | Rate limiting thresholds |
+| EIP, subnet, security group | Feature flags (CAPTCHA enabled, SES enabled) |
+| SSM parameter fetching | Email templates, OTP expiry |
+| Health check URLs, timeouts | CORS origins, JWT expiry |
+| Container restart policy | Logging levels |
+
+**Why:** Application config should be version-controlled, profile-aware, and testable. Deploy scripts should be environment-agnostic wrappers that wire infrastructure.
+
+**SSM as override mechanism:** SSM Parameter Store can provide runtime overrides (e.g., change a limit without redeploying), but the **primary source of truth** for application config is `application-{profile}.yml`. SSM overrides are optional, not required.
+
+**Environment-specific config pattern:**
+- `application.yml` — shared defaults (dev-friendly: higher limits, local email, CAPTCHA disabled)
+- `application-prod.yml` — prod overrides (strict limits, SES enabled, CAPTCHA enabled)
+- `application-dev.yml` — dev-specific overrides (if different from base defaults)
+- SSM — runtime overrides only (for changing values without redeployment)
+
+---
+
+# Current Architecture (Implemented — 2026-03-14)
+
+**Region:** us-east-1 (N. Virginia)
+**Cost:** ~$24-25/month (unchanged from in-place deploy)
+
+## Architecture Overview
+
+```
+Internet
+   |
+CloudFront (E249N2JVWYGK8A)
+   |
+   ├── /graphql → EIP (18.206.134.231) → EC2 (CI/CD-managed) [Public Subnet, port 8080]
+   │                                        |
+   │                                     RDS (hestia-dev-db) [Private Subnet]
+   │
+   └── /* → S3 (hestia-dev-frontend) [Static SPA]
+```
+
+## Blue-Green Deploy Flow
+
+```
+CI/CD (GitHub Actions)
+  │
+  ├─ 1. Build & push Docker image to ECR (unchanged)
+  │
+  ├─ 2. Launch NEW EC2 from Launch Template (lt-0fc2e9d34dcaf6006)
+  │
+  ├─ 3. Wait for instance ready + SSM agent registration (~60-90s)
+  │
+  ├─ 4. Run deploy.sh ON new instance via SSM
+  │      (ECR pull, SSM config fetch, docker run)
+  │
+  ├─ 5. Health check new instance (curl :8080/actuator/health)
+  │
+  ├─ 6. Swap Elastic IP: old instance → new instance
+  │      (single API call with --allow-reassociation, ~0-5s blip)
+  │
+  ├─ 7. Verify health via Elastic IP
+  │
+  └─ 8. Terminate old instance
+```
+
+**Rollback is automatic:**
+- If health check fails at step 5 → terminate new instance, old untouched
+- If post-swap check fails at step 7 → re-associate EIP to old, terminate new
+
+## Instance Tagging Convention
+
+| Tag | Value | Purpose |
+|-----|-------|---------|
+| `Status` | `active` | Currently serving traffic via EIP |
+| `Status` | `provisioning` | Being set up by blue-green script |
+| `Status` | `draining` | Old instance, about to be terminated |
+| `ManagedBy` | `ci-cd` | Launched by GitHub Actions (not Terraform) |
+| `DeployedAt` | ISO 8601 timestamp | When the instance was deployed |
+| `ImageTag` | Docker image tag | Which version is running |
+
+## Key Resources (Dev)
+
+| Resource | ID/Value |
+|----------|----------|
+| Elastic IP | `eipalloc-02f586bc05fd635bc` (18.206.134.231) |
+| EIP DNS | `ec2-18-206-134-231.compute-1.amazonaws.com` |
+| Launch Template | `lt-0fc2e9d34dcaf6006` |
+| Public Subnet | `aws_subnet.public[0]` |
+| CloudFront Dist | `E249N2JVWYGK8A` |
+| Frontend URL | `https://d1twtjfgg5e272.cloudfront.net` |
+
+## Downtime During Deploy
+
+- **Old (in-place):** 10-30s (container stop/start gap) + dirty-state failures
+- **Blue-green:** 0-5s (EIP reassociation propagation). CloudFront may retry 1-2 failed requests.
+
+---
+
+# Region Layout
+
+| Component | Region | Why |
+|-----------|--------|-----|
+| ECR Repository | us-east-1 | Created by `terraform/cicd/`, shared across envs |
+| Dev VPC, EC2, RDS | us-east-1 | Same region as ECR (simplifies networking) |
+| SSM Parameters | us-east-1 | Co-located with compute |
+| Terraform State (S3) | us-east-1 | Single state bucket for all environments |
+
+> **Note:** Originally planned for ap-south-1 but moved to us-east-1 due to new AWS account EC2 region restrictions.
+
+**Deploy script reads region config from `/opt/hestia/env.conf`:**
+```bash
+ECR_REGION=us-east-1    # Docker image pulls
+SSM_REGION=us-east-1    # Parameter Store reads
+```
+
+---
+
+# VPC Architecture (Dev)
+
+* **VPC:** 10.0.0.0/16 (`hestia-dev-vpc`)
+* **Public Subnets:** 10.0.1.0/24, 10.0.2.0/24 (EC2 here, `map_public_ip_on_launch = true`)
+* **Private Subnets:** 10.0.10.0/24, 10.0.11.0/24 (RDS here, no internet route)
+* **Internet Gateway:** Single IGW for public subnets
+* **Route Tables:** Public routes to IGW; private has no internet route (RDS doesn't need outbound)
+
+---
+
+# Security Groups (Dev)
+
+### hestia-dev-sg-ec2
+```
+Inbound:
+  - Port 8080 from 0.0.0.0/0  (API access — no ALB in simplified arch)
+  - Port 22   from 0.0.0.0/0  (SSH fallback — prefer SSM Session Manager)
+Outbound:
+  - All traffic (Docker pulls, AWS API, ECR, SSM)
+```
+
+### hestia-dev-sg-rds
+```
+Inbound:
+  - Port 5432 from hestia-dev-sg-ec2 ONLY
+Outbound:
+  - None
+```
+
+---
+
+# Compute (Dev)
+
+* **Instance Type:** t4g.micro (ARM64, ~$7/month)
+* **AMI:** Amazon Linux 2023 ARM64 (latest via `data "aws_ami"`)
+* **Root Volume:** 30GB gp3, encrypted (AL2023 AMI requires >= 30GB)
+* **User Data:** Installs Docker, writes `/opt/hestia/env.conf` with region config
+* **IAM Role:** `hestia-dev-ec2-role` with:
+  - `AmazonSSMManagedInstanceCore` (managed policy for SSM)
+  - ECR pull from us-east-1
+  - SSM parameter read from us-east-1 `/hestia/dev/*`
+* **Instance Profile:** `hestia-dev-ec2-profile`
+* **Lifecycle:** Instances are ephemeral — created fresh on each deploy, terminated after EIP swap
+
+---
+
+# Database (Dev)
+
+| Property | Value |
+|----------|-------|
+| Identifier | `hestia-dev-db` |
+| Engine | PostgreSQL 16 |
+| Instance Class | db.t4g.micro (~$15/month) |
+| Storage | 20GB gp3, encrypted |
+| Multi-AZ | No |
+| Publicly Accessible | No |
+| Backup Retention | 1 day (free tier limit) |
+| `skip_final_snapshot` | true (dev only) |
+| `delete_automated_backups` | false (safety margin on destroy) |
+
+---
+
+# SSM Parameters (Dev, us-east-1)
+
+Auto-populated by Terraform from `terraform/dev/ssm.tf`:
+```
+/hestia/dev/db/host     → RDS endpoint (String)
+/hestia/dev/db/name     → hestia_dev (String)
+/hestia/dev/db/username → hestia_dev_user (String)
+/hestia/dev/db/password → <from var.db_password> (SecureString)
+/hestia/dev/jwt/secret  → <from var.jwt_secret> (SecureString)
+/hestia/dev/ses/sender-email → noreply@justhestia.app (String)
+```
+
+---
+
+# Terraform Structure
+
+```
+terraform/
+  cicd/                        # CI/CD infrastructure (us-east-1)
+  |  ├── main.tf               # ECR, OIDC, GitHub Actions roles
+  |  ├── deployment-bot-policy.json
+  |  └── ...
+  |
+  dev/                         # Dev environment (us-east-1)
+     ├── backend.tf            # S3 remote state (key: dev/terraform.tfstate)
+     ├── providers.tf          # AWS provider → us-east-1
+     ├── variables.tf          # aws_region, ecr_region, db_password, jwt_secret
+     ├── vpc.tf                # VPC, subnets, IGW, route tables
+     ├── security-groups.tf    # EC2 + RDS security groups
+     ├── iam.tf                # EC2 role, instance profile
+     ├── ec2.tf                # EIP + Launch Template (seed instance removed)
+     ├── user-data.sh          # EC2 bootstrap (Docker, env.conf)
+     ├── rds.tf                # PostgreSQL 16
+     ├── ssm.tf                # Parameter Store entries
+     ├── s3.tf                 # S3 images bucket
+     ├── outputs.tf            # EIP, launch template, RDS outputs
+     ├── terraform.tfvars.example
+     └── .gitignore            # Excludes .terraform/, *.tfstate, terraform.tfvars
+```
+
+---
+
+# CI/CD Pipeline
+
+**Workflow:** `.github/workflows/ci-cd.yml` (manual dispatch with `deploy` input)
+
+```
+Job 1: Build & Test
+  → Compile, unit tests, integration tests, Spotless check
+
+Job 2: Docker Build & Push (ARM64)  [only when deploy=true]
+  → OIDC auth → ECR login → buildx ARM64 → push to ECR (us-east-1)
+
+Job 3: Blue-Green Deploy to Dev     [only when deploy=true]
+  → Launch new EC2 → deploy.sh via SSM → health check → EIP swap → terminate old
+```
+
+**Deploy scripts:**
+- `scripts/deploy/blue-green-deploy.sh` — Orchestration (runs in GitHub Actions runner)
+- `scripts/deploy/deploy.sh` — App deployment (runs ON the EC2 instance via SSM)
+
+## GitHub Repository Variables (Non-Sensitive)
+
+| Variable | Value | Purpose |
+|----------|-------|---------|
+| `EIP_ALLOCATION_ID` | `eipalloc-02f586bc05fd635bc` | Blue-green EIP swap |
+| `LAUNCH_TEMPLATE_ID` | `lt-0fc2e9d34dcaf6006` | New instance creation |
+| `SUBNET_ID` | (from Terraform output) | Instance placement |
+
+---
+
+# IAM Permissions for Blue-Green Deploy
+
+The `github-actions` role (`terraform/cicd/main.tf`) needs these additional permissions for blue-green:
+
+| Permission | Resource | Purpose |
+|------------|----------|---------|
+| `ec2:RunInstances` | Launch Template ARN | Launch new instances |
+| `ec2:DescribeInstances` | `*` | Find current active instance |
+| `ec2:DescribeInstanceStatus` | `*` | Wait for instance ready |
+| `ec2:TerminateInstances` | `hestia-*` tagged instances | Cleanup old instance |
+| `ec2:CreateTags` | `*` | Tag instances with Status |
+| `ec2:AssociateAddress` | EIP ARN | Swap EIP to new instance |
+| `ec2:DisassociateAddress` | `*` | Remove EIP from old instance |
+| `ec2:DescribeAddresses` | `*` | Find EIP details |
+| `iam:PassRole` | EC2 role ARN | Pass role to new instance |
+| `ssm:SendCommand` | `*` | Run deploy.sh on new instance |
+| `ssm:GetCommandInvocation` | `*` | Check deploy.sh result |
+| `ssm:DescribeInstanceInformation` | `*` | Verify SSM agent ready |
+
+## IAM Gotchas
+
+- `ssm:DescribeParameters` requires `Resource: "*"` — cannot scope to specific paths
+- `iam:PassRole` must target the specific EC2 role ARN
+- `ec2:RunInstances` needs access to the Launch Template, AMI, subnet, security group, and instance profile
+
+---
+
+# Shared Concerns
+
+## Secrets & Configuration
+
+### SSM Parameter Store (Standard Tier — FREE)
+
+**Per-environment parameters:**
+```
+/hestia/{env}/db/host     → RDS endpoint
+/hestia/{env}/db/name     → Database name
+/hestia/{env}/db/username → Database user
+/hestia/{env}/db/password → <SecureString>
+/hestia/{env}/jwt/secret  → <SecureString>
+/hestia/{env}/ses/sender-email → SES sender address
+```
+
+**IAM Permissions:** Each EC2 role reads ONLY its own environment's parameters.
+
+### Secrets Management Rules
+* No secrets in GitHub (OIDC for AWS auth)
+* No secrets in Docker images
+* All secrets in SSM Parameter Store (SecureString)
+* EC2 fetches secrets at deploy time via deploy.sh
+
+## Observability
+
+### CloudWatch Logs
+* `/hestia/dev/*` — Dev logs (scoped by IAM policy)
+* `/hestia/prod/*` — Prod logs (future)
+
+### Key Metrics to Monitor
+* EC2: CPUUtilization
+* RDS: CPUUtilization, DatabaseConnections, FreeStorageSpace
+
+## Backup & Disaster Recovery
+
+* **RDS automated backups:** 1-day retention (dev, free tier), 03:00-04:00 UTC window
+* **Dev:** `skip_final_snapshot = true`, `delete_automated_backups = false`
+* **Prod (future):** Manual snapshot before each deploy, 7-day retention
+* **Restore:** Snapshot → new RDS instance → update SSM host param → next deploy picks it up
+
+---
+
+# Deployment Principles
+
+1. **Immutable Infrastructure:**
+   > Every deploy creates a fresh EC2 instance. No in-place mutations. Dirty state is structurally impossible.
+
+2. **Cost Consciousness:**
+   > EIP swap ($0/mo) instead of ALB ($16+/mo). Brief 2-instance overlap during deploy costs ~$0.001.
+
+3. **Security (defense in depth):**
+   > Database must never be publicly exposed.
+   > EC2 accessible on port 8080 (dev). Tighten for prod (ALB + private subnet).
+
+4. **Environment Isolation:**
+   > Each environment has its own VPC, RDS, EC2, EIP, and SSM parameters.
+   > Cross-environment access is impossible by design.
+
+5. **Automatic Rollback:**
+   > Health check failure at any stage aborts the deploy and preserves the old instance.
+
+If deployment increases attack surface or cost unnecessarily, it must be rejected.
+
+---
+
+# Deployment Gotchas & Learnings
+
+## 1. SES IAM Requires Configuration-Set Resource (March 2026)
+
+When using SES with a Configuration Set (for tracking bounces/deliveries), the IAM policy needs **TWO** resource ARNs:
+
+```json
+// ❌ WRONG — causes silent 403 on all emails
+"Resource": "arn:aws:ses:us-east-1:ACCOUNT:identity/*"
+
+// ✅ CORRECT — both identity AND configuration-set
+"Resource": [
+  "arn:aws:ses:us-east-1:ACCOUNT:identity/*",
+  "arn:aws:ses:us-east-1:ACCOUNT:configuration-set/hestia-prod-tracking"
+]
+```
+
+**Impact:** ALL emails fail silently (password reset, invitations, thank-you). SQS retries until DLQ. No user-facing error — the mutation returns success but email never arrives.
+
+## 2. Deploy.sh Env File Must Be Persistent (March 2026)
+
+Docker `--restart unless-stopped` re-reads the `--env-file` path on container restart. If the env file was created with `mktemp` and deleted by a `trap`, the restarted container gets no environment variables and falls back to Dockerfile defaults (wrong Spring profile).
+
+```bash
+# ❌ WRONG — file deleted on script exit, Docker can't re-read on restart
+ENV_FILE=$(mktemp)
+trap 'rm -f "$ENV_FILE"' EXIT
+
+# ✅ CORRECT — persistent file survives container restarts
+ENV_FILE="/opt/hestia/env"
+chmod 600 "$ENV_FILE"
+```
+
+## 3. SES DKIM Verification Can Silently Fail (March 2026)
+
+If SES DKIM status shows `FAILED` but DNS CNAME records are correct, the cached verification state is stale. Fix by deleting and re-creating the identity:
+
+```bash
+aws sesv2 delete-email-identity --email-identity justhestia.app
+aws sesv2 create-email-identity --email-identity justhestia.app
+# DKIM re-verifies within 60 seconds if DNS records exist
+```
+
+**Note:** This does NOT affect production SES access (account-level) or require re-requesting sandbox exit.
+
+## 4. Spring Profiles: Never Share Between Local and Deployed (March 2026)
+
+A single `application-dev.yml` cannot serve both local development and deployed EC2. They have fundamentally different requirements:
+
+| Setting | Local | Deployed EC2 |
+|---------|-------|-------------|
+| DB connection | localhost:5433 | RDS via SSM |
+| Flyway clean | Allowed | MUST be disabled |
+| Seed data | Included | NEVER included |
+| CORS origins | localhost only | CloudFront URLs |
+
+**Solution:** Three separate profiles: `local` (developer workstation), `dev` (deployed staging), `prod` (deployed production). Deploy.sh sets `SPRING_PROFILES_ACTIVE` based on environment.
+
+## 5. Scaling Blockers: In-Memory Singletons (March 2026)
+
+Before scaling to 2+ EC2 instances, these in-memory components must move to Redis:
+
+- `InMemoryLoginRateLimiter` — per-instance rate limit bypassed by hitting different instances
+- `PublicRsvpService.rateLimitWindows` — RSVP abuse amplified across instances
+- `EmailSuppressionService.suppressedEmails` — suppressed emails leak between instances
+
+**Current architecture is single-instance only.** All three use `ConcurrentHashMap` (JVM-local state).

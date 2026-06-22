@@ -1,0 +1,869 @@
+---
+
+description: Backend architecture, stack, and governance – single authoritative spec
+alwaysApply: true
+-----------------
+
+# Backend Architecture – Complete Architecture Pack
+
+This document is the single authoritative backend architecture specification for the Hestia Application.
+
+It consolidates:
+
+* Architecture style
+* Domain design
+* API strategy
+* Security model
+* Data model approach
+* Infrastructure decisions
+* CI/CD strategy
+* Observability
+* Scalability model
+* Governance rules
+
+This document is written for:
+
+* Senior engineers
+* AI-assisted development (Cursor)
+* Code reviewers (Codex)
+
+---
+
+# 1. Backend Architectural Philosophy
+
+## 1.1 Core Principles
+
+* Domain-Driven Design (DDD)
+* Modular Monolith (v1)
+* Explicit boundaries
+* Stateless services
+* Infrastructure as Code
+* Production-first thinking
+
+We optimize for:
+
+* Reliability
+* Maintainability
+* Observability
+* Evolution toward microservices (when needed)
+
+---
+
+# 2. System Architecture Style
+
+## 2.1 Architectural Pattern
+
+**Modular Monolith with Domain Boundaries**
+
+Why modular monolith?
+
+* Lower operational complexity
+* Clear domain separation
+* Faster iteration
+* Easier debugging
+* Reduced cloud overhead
+
+Migration path to microservices is preserved via:
+
+* Domain encapsulation
+* API boundaries
+* Infrastructure isolation
+
+---
+
+# 3. Technology Stack
+
+## 3.1 Core Stack
+
+* Java 21
+* Spring Boot
+* GraphQL (primary API)
+* REST (secondary/internal)
+* PostgreSQL
+* Flyway (DB migrations)
+* Docker
+* AWS EC2 (via Auto Scaling in prod)
+* AWS RDS (PostgreSQL)
+* Terraform (IaC)
+
+## 3.2 Cost Optimization Principle
+
+> **Principle**: Use only **absolutely necessary** AWS services. Start minimal, add services when performance/scale demands it.
+
+**This is a personal AWS account project – cost is a primary decision factor.**
+
+**Environment Strategy:**
+* Single AWS account with **dev** and **prod** environments (separated by resource tags/naming)
+* Dev: Single AZ, smaller instances, no redundancy
+* Prod: Multi-AZ for critical components only when traffic justifies it
+
+**Cost Targets:**
+* Dev environment: ~$60/month
+* Prod environment: ~$90-255/month (depending on traffic and Multi-AZ RDS)
+
+---
+
+## 3.3 AWS Platform Components (Cost-Optimized)
+
+This section captures the AWS services the backend uses, optimized for minimal cost.
+
+### Edge / Networking (Required)
+
+* **Route 53** – DNS for `api.<domain>` (~$1/month)
+* **ACM** – TLS certificates (FREE)
+* **VPC** – network foundation with public/private subnets (FREE)
+* **Security Groups** – EC2/RDS traffic control (FREE)
+* **Internet Gateway** – public internet access for ALB (FREE)
+* **NAT Gateway** – private subnet internet access (~$32/month + data transfer)
+  * **Cost optimization**: Use **NAT Instance (t4g.nano)** instead (~$3/month) or **VPC Endpoints** for AWS services
+* **ALB (Application Load Balancer)** – HTTPS entrypoint (~$20-25/month)
+  * **Dev alternative**: Skip ALB, use EC2 public IP + Caddy/Let's Encrypt to save ~$22/month
+
+### Compute & Images (Required)
+
+* **EC2 t4g.micro/small (ARM-based)** – runs dockerized Spring Boot (~$7-15/month per instance)
+  * Dev: 1 instance
+  * Prod: 1-2 instances (ASG optional, add when traffic grows)
+  * ARM instances are 20-40% cheaper than x86
+* **ECR** – container registry (~$1-5/month for 500MB-2GB storage)
+* **ECR Lifecycle Policies** – auto-delete old images (FREE)
+
+### Data (Required)
+
+* **RDS PostgreSQL db.t4g.micro** – primary database (private subnets; encryption enabled)
+  * Dev: Single AZ (~$13/month + $2.30/month for 20GB storage)
+  * Prod: Single AZ initially (~$15/month), Multi-AZ when budget allows (~$30/month)
+* **RDS Automated Backups** – 7-day retention (included in RDS cost)
+* **RDS Manual Snapshots** – pre-deployment backups (~$2-5/month for 2-3 snapshots at $0.095/GB-month)
+
+### Config / Secrets / Encryption (Required)
+
+* **SSM Parameter Store (Standard tier)** – runtime configuration (FREE for <10,000 parameters)
+* **IAM Roles** – least-privilege access from EC2 to AWS services (FREE)
+* **IAM OIDC Provider** – GitHub Actions authentication without long-lived credentials (FREE)
+* **KMS (AWS-managed keys)** – encryption at rest for RDS/SSM (FREE for AWS-managed, $1/month for customer-managed)
+
+### Observability / Audit (Required - Minimal)
+
+* **CloudWatch Logs** – structured JSON logs with 7-day retention (~$5-15/month at $0.50/GB ingested)
+* **CloudWatch Metrics/Alarms** – CPU, memory, RDS health monitoring (~$2-5/month)
+  * First 10 metrics FREE, then $0.30/metric/month
+  * Alarms: $0.10/alarm/month
+* **CloudTrail** – AWS API audit trail (FREE for 90-day event history)
+
+### Notifications & Async (Required for core product)
+
+* **SES** – transactional email (hestias, reminders, confirmations)
+  * FREE for first 62,000 emails/month when sent from EC2
+  * Then $0.10 per 1,000 emails (~$0-5/month)
+* **SNS** – SMS/OTP delivery (~$10-30/month depending on volume)
+  * $0.00645 per SMS (US)
+  * 100 OTPs/day = ~$20/month
+  * Use SNS for simple SMS (Pinpoint deferred due to cost)
+* **SQS** – async job queue for notification sending and long-running tasks
+  * First 1 million requests/month FREE
+  * Then $0.40/million requests (~$0-2/month)
+
+### Optional / Future (Add When Needed)
+
+* **WAF** – L7 protection (add when abuse occurs) (~$5/month + $1/million requests)
+* **S3** – invitation images, exports, attachments (add when feature needed) (~$0.50-5/month)
+* **ElastiCache Redis** – caching, OTP throttling, idempotency locks (add for performance) (~$13/month for cache.t4g.micro)
+* **VPC Endpoints** – reduce NAT Gateway costs (add if NAT costs exceed $50/month) (~$7/month per endpoint)
+* **EventBridge** – event routing/fan-out (use SQS for now, add when system grows)
+* **RDS Multi-AZ** – high availability (add when uptime SLA matters) (~$17/month additional)
+* **X-Ray** – distributed tracing (use structured logs + CloudWatch Insights instead)
+* **Secrets Manager** – secret rotation (SSM Parameter Store sufficient for now) (~$0.40/secret/month)
+* **RDS Proxy** – connection pooling (not needed for EC2-based apps) (~$13/month)
+
+---
+
+## 3.4 Deferred Components (TODO)
+
+The following are documented for future reference but NOT implemented in initial setup:
+
+### Backup (Documented, Basic Implementation)
+* RDS automated backups enabled (7-day retention)
+* Manual snapshot strategy before deployments (TBD in runbook)
+* AWS Backup for centralized policy management (deferred)
+
+### CI/CD (Documented, Implementation TBD)
+* GitHub Actions + IAM OIDC Provider (architecture documented)
+* Pipeline steps defined (section 11.2)
+* Terraform automation for infrastructure updates (deferred)
+
+### Monitoring (Basic Implementation, Advanced Deferred)
+* CloudWatch Logs/Metrics/Alarms enabled (minimal set)
+* X-Ray distributed tracing (deferred)
+* Prometheus + Grafana (deferred)
+* Advanced log analytics with CloudWatch Insights (deferred)
+
+### Security (Basic Implementation, Advanced Deferred)
+* WAF (deferred until traffic patterns emerge)
+* Shield Advanced (deferred, Shield Standard enabled by default)
+* VPC Flow Logs (deferred)
+* AWS Config compliance rules (deferred)
+
+---
+
+## 3.5 Monthly Cost Estimate
+
+### Dev Environment (Minimal)
+| Component | Monthly Cost |
+|-----------|-------------|
+| EC2 t4g.micro (1 instance) | $7 |
+| RDS db.t4g.micro (single AZ) | $15 |
+| NAT Instance (t4g.nano) | $3 |
+| ECR | $2 |
+| Route 53 | $1 |
+| CloudWatch Logs (7-day retention) | $5 |
+| CloudWatch Alarms | $2 |
+| SES (low volume) | $0 |
+| SNS (100 OTPs/day) | $20 |
+| SQS | $0 |
+| RDS Backups | $3 |
+| **Total Dev** | **~$58/month** |
+
+### Prod Environment (Low Traffic)
+| Component | Monthly Cost |
+|-----------|-------------|
+| EC2 t4g.small (1-2 instances) | $15-30 |
+| RDS db.t4g.micro (single AZ) | $15 |
+| NAT Gateway (required for prod) | $35 |
+| ALB | $22 |
+| ECR | $5 |
+| Route 53 | $1 |
+| CloudWatch Logs | $15 |
+| CloudWatch Alarms | $5 |
+| SES (moderate volume) | $5 |
+| SNS (500 OTPs/day) | $100 |
+| SQS | $2 |
+| RDS Backups | $5 |
+| **Total Prod (Single AZ)** | **~$220/month** |
+| **Total Prod (Multi-AZ RDS)** | **~$237/month** |
+
+### Ultra-Minimal (Dev + Prod Shared VPC - Selected Approach)
+
+**This is the chosen architecture for initial deployment.**
+
+Running dev and prod in same VPC with shared infrastructure, but **separate RDS instances for safety**:
+
+| Component | Monthly Cost |
+|-----------|-------------|
+| EC2 t4g.micro (1 instance - shared) | $7 |
+| **RDS db.t4g.micro (dev) - single AZ** | **$15** |
+| **RDS db.t4g.micro (prod) - single AZ** | **$15** |
+| NAT Instance (t4g.nano) | $3 |
+| ALB | $22 |
+| ECR | $3 |
+| Route 53 | $1 |
+| CloudWatch (minimal) | $10 |
+| SES + SNS + SQS | $25 |
+| RDS Backups (both instances) | $6 |
+| **Total Shared** | **~$107/month** |
+
+**Why separate RDS instances even in shared VPC:**
+* ✅ **Critical safety**: Dev schema changes cannot break prod
+* ✅ **Performance isolation**: Dev queries don't slow down prod
+* ✅ **Restore confidence**: Can restore prod independently
+* ✅ **Cost justified**: $15/month insurance against data loss
+
+**Recommended Starting Point: ~$107/month**
+
+**Cost Reduction Tips:**
+* Use **t4g (ARM-based) instances** (20-40% cheaper than t3/t3a)
+* Use **NAT Instance** instead of NAT Gateway (saves ~$30/month)
+* Use **7-day log retention** instead of 30+ days
+* Leverage **free tiers**: SES (62k emails/month from EC2), SQS (1M requests/month), CloudTrail (90-day history)
+* Monitor costs with **AWS Budgets** (free) - set alert at $120/month
+
+---
+
+## 3.6 Environment Separation Strategy (Shared VPC)
+
+**Challenge**: Running dev and prod in the same VPC requires strict isolation to prevent accidents.
+
+### 3.6.1 Resource Naming Convention
+
+All AWS resources must follow this naming pattern:
+
+```
+hestia-{environment}-{resource-type}-{optional-descriptor}
+```
+
+**Examples:**
+* EC2: `hestia-dev-ec2-web`, `hestia-prod-ec2-web`
+* RDS: `hestia-dev-db`, `hestia-prod-db`
+* Security Groups: `hestia-dev-sg-ec2`, `hestia-prod-sg-rds`
+* ALB Target Groups: `hestia-dev-tg`, `hestia-prod-tg`
+
+### 3.6.2 AWS Resource Tags (Required)
+
+Every AWS resource must have these tags:
+
+| Tag Key | Tag Value | Purpose |
+|---------|-----------|---------|
+| `Environment` | `dev` or `prod` | Cost tracking, filtering |
+| `Project` | `hestia` | Multi-project account support |
+| `ManagedBy` | `terraform` | IaC ownership |
+| `CostCenter` | `personal` | Billing allocation |
+
+**Usage:**
+* Cost Explorer: Filter by `Environment=prod` to see prod-only costs
+* AWS Budgets: Create separate budgets for dev vs prod
+* Terraform: Use tags to prevent accidental resource deletion
+
+### 3.6.3 Network Isolation (Security Groups)
+
+**Strict firewall rules prevent cross-environment access:**
+
+#### Dev Security Groups
+```
+hestia-dev-sg-ec2 (EC2 instances):
+  Inbound:
+    - Port 8080 from hestia-dev-sg-alb
+  Outbound:
+    - Port 5432 to hestia-dev-sg-rds
+    - HTTPS to internet (for dependencies)
+
+hestia-dev-sg-rds (RDS database):
+  Inbound:
+    - Port 5432 from hestia-dev-sg-ec2 ONLY
+  Outbound:
+    - None
+
+hestia-dev-sg-alb (Load Balancer):
+  Inbound:
+    - Port 443 from 0.0.0.0/0 (public internet)
+  Outbound:
+    - Port 8080 to hestia-dev-sg-ec2
+```
+
+#### Prod Security Groups
+```
+hestia-prod-sg-ec2 (EC2 instances):
+  Inbound:
+    - Port 8080 from hestia-prod-sg-alb
+  Outbound:
+    - Port 5432 to hestia-prod-sg-rds
+    - HTTPS to internet (for dependencies)
+
+hestia-prod-sg-rds (RDS database):
+  Inbound:
+    - Port 5432 from hestia-prod-sg-ec2 ONLY
+  Outbound:
+    - None
+
+hestia-prod-sg-alb (Load Balancer):
+  Inbound:
+    - Port 443 from 0.0.0.0/0 (public internet)
+  Outbound:
+    - Port 8080 to hestia-prod-sg-ec2
+```
+
+**Critical Rule:**
+> Dev EC2 instances CANNOT access Prod RDS and vice versa. This is enforced at the security group level.
+
+### 3.6.4 Database Isolation (Separate RDS Instances)
+
+**Configuration:**
+
+| Property | Dev | Prod |
+|----------|-----|------|
+| Instance ID | `hestia-dev-db` | `hestia-prod-db` |
+| Instance Class | `db.t4g.micro` | `db.t4g.micro` |
+| Multi-AZ | No | No (upgrade to Yes when traffic justifies) |
+| Storage | 20GB gp3 | 20GB gp3 |
+| Backup Retention | 7 days | 7 days |
+| Security Group | `hestia-dev-sg-rds` | `hestia-prod-sg-rds` |
+| Publicly Accessible | No | No |
+
+**Connection Strings (SSM Parameters):**
+```
+/hestia/dev/db/host → hestia-dev-db.xxxx.us-east-1.rds.amazonaws.com
+/hestia/dev/db/port → 5432
+/hestia/dev/db/name → hestia_dev
+
+/hestia/prod/db/host → hestia-prod-db.xxxx.us-east-1.rds.amazonaws.com
+/hestia/prod/db/port → 5432
+/hestia/prod/db/name → hestia_prod
+```
+
+### 3.6.5 Application Configuration (Environment Variables)
+
+EC2 instances load configuration from SSM Parameter Store based on environment:
+
+**Dev EC2 Startup:**
+```bash
+export ENVIRONMENT=dev
+export DB_HOST=$(aws ssm get-parameter --name /hestia/dev/db/host --query 'Parameter.Value' --output text)
+export DB_NAME=$(aws ssm get-parameter --name /hestia/dev/db/name --query 'Parameter.Value' --output text)
+```
+
+**Prod EC2 Startup:**
+```bash
+export ENVIRONMENT=prod
+export DB_HOST=$(aws ssm get-parameter --name /hestia/prod/db/host --query 'Parameter.Value' --output text)
+export DB_NAME=$(aws ssm get-parameter --name /hestia/prod/db/name --query 'Parameter.Value' --output text)
+```
+
+### 3.6.6 DNS & Routing
+
+**Route 53 Configuration:**
+
+| Subdomain | Environment | Target |
+|-----------|-------------|--------|
+| `api-dev.yourdomain.com` | Dev | `hestia-dev-alb-xxxx.us-east-1.elb.amazonaws.com` |
+| `api.yourdomain.com` | Prod | `hestia-prod-alb-xxxx.us-east-1.elb.amazonaws.com` |
+
+**ALB Listener Rules:**
+* Each ALB forwards to its own target group
+* Dev ALB → Dev EC2 target group
+* Prod ALB → Prod EC2 target group
+
+---
+
+## 3.7 Cost Monitoring & Budgets
+
+### 3.7.1 AWS Budgets Setup (Free)
+
+**Budget 1: Overall Monthly Cost**
+* Budget Amount: $120/month
+* Alert Threshold: 80% ($96)
+* Notification: Email when exceeded
+
+**Budget 2: Dev Environment**
+* Filter: Tag `Environment=dev`
+* Budget Amount: $40/month
+* Alert Threshold: 90% ($36)
+
+**Budget 3: Prod Environment**
+* Filter: Tag `Environment=prod`
+* Budget Amount: $80/month
+* Alert Threshold: 90% ($72)
+
+### 3.7.2 Monthly Cost Review Checklist
+
+Review AWS Cost Explorer on the 1st of each month:
+
+- [ ] Total monthly cost vs budget
+- [ ] Cost by service (identify expensive services)
+- [ ] Cost by environment (dev vs prod split)
+- [ ] Unexpected cost spikes (investigate anomalies)
+- [ ] Unused resources (idle EC2, orphaned snapshots)
+
+### 3.7.3 Cost Optimization Opportunities
+
+**When costs exceed $120/month, consider:**
+
+1. **NAT Gateway replacement** (~$30/month savings)
+   - Replace with NAT Instance (t4g.nano) if NAT Gateway costs are high
+   - Or use VPC Endpoints for AWS services (S3, ECR, SSM)
+
+2. **Log retention reduction** (~$5-10/month savings)
+   - Reduce CloudWatch Logs retention from 7 days to 3 days for dev
+   - Keep 7 days for prod
+
+3. **RDS right-sizing** (variable savings)
+   - Monitor CPU/memory usage
+   - If consistently <20%, consider db.t4g.nano (saves ~$7/month)
+
+4. **Reserved Instances** (30-40% savings if committed)
+   - After 3+ months of stable usage, purchase 1-year RI for EC2/RDS
+   - Only for prod instances, not dev
+
+---
+
+## 3.8 Migration Path to Separate VPCs
+
+**When to migrate:** When monthly revenue > $500 or team size > 2 engineers
+
+**Migration Steps:**
+
+### Phase 1: Create New Prod VPC
+1. Create new VPC (`hestia-prod-vpc`)
+2. Deploy prod infrastructure via Terraform
+3. Test new prod environment with DNS cutover test
+
+### Phase 2: Data Migration
+1. Create RDS snapshot of current prod database
+2. Restore snapshot to new prod VPC RDS instance
+3. Verify data integrity
+
+### Phase 3: DNS Cutover
+1. Update Route 53 `api.yourdomain.com` to point to new prod ALB
+2. Monitor traffic for 24 hours
+3. Keep old prod running for 7 days as rollback option
+
+### Phase 4: Cleanup
+1. Decommission old shared prod resources
+2. Keep dev environment in original VPC
+3. Update Terraform to manage two VPCs
+
+**Downtime:** ~5-10 minutes during DNS cutover
+**Rollback Plan:** Revert Route 53 DNS change (takes ~1 minute)
+
+**Cost Impact:**
+* Before: ~$107/month (shared VPC)
+* After: ~$140/month (separate VPCs) - adds ~$33/month for second NAT Gateway/ALB
+
+---
+
+# 4. Java Module System (JPMS) – Required
+
+This backend must use the **Java Platform Module System (JPMS)** to enforce domain boundaries at compile time.
+
+Why JPMS belongs here:
+
+* It is part of **code architecture**, not infrastructure
+* It enforces DDD boundaries and prevents accidental cross-domain coupling
+* It improves long-term maintainability and supports easier microservice extraction later
+
+## 4.1 JPMS Module Mapping
+
+Each domain is a separate **Java module**.
+
+Example module names:
+
+* `hestia.host`
+* `hestia.invitation`
+* `hestia.rsvp`
+* `hestia.notification`
+* `hestia.auth`
+* `hestia.payment` (future)
+
+## 4.2 Module Export Rules (Strict)
+
+* Only a domain’s **API package** is exported.
+* Domain internals are not exported.
+* Infrastructure packages are not exported.
+
+Example `module-info.java`:
+
+```java
+module hestia.invitation {
+  requires spring.context;
+  requires spring.beans;
+
+  // If cross-domain access is required, depend on exported APIs only
+  requires hestia.host;
+
+  // Export only API contracts (DTOs, ports, public facades)
+  exports com.hestia.invitation.api;
+}
+```
+
+Notes:
+
+* Cross-domain calls must go through exported APIs (ports/facades), not internal classes.
+* No reflective access to bypass boundaries.
+
+---
+
+# 5. Domain-Driven Design Structure
+
+## 5.1 Domain Modules
+
+Each domain must live in its own package/module.
+
+Example (package view):
+
+```
+com.hestia
+ ├── invitation
+ ├── rsvp
+ ├── host
+ ├── notification
+ ├── auth
+ └── payment (future)
+```
+
+Each domain contains:
+
+* Entities
+* Value Objects
+* Domain Services
+* Repository Interfaces
+* Application Services
+
+---
+
+## 5.2 Layering Per Domain
+
+Within each domain:
+
+```
+domain/
+  entity/
+  value/
+  service/
+application/
+  usecase/
+infrastructure/
+  repository/
+  persistence/
+  integrations/
+api/
+  graphql/
+  rest/
+```
+
+Rules:
+
+* Domain layer must not depend on infrastructure
+* Infrastructure implements domain interfaces
+* Application orchestrates domain
+* API layer calls application only
+
+---
+
+# 6. API Strategy
+
+## 6.1 GraphQL (Primary)
+
+GraphQL is the primary external API.
+
+Rules:
+
+* Schema-first development
+* Versionless schema
+* Strict resolver separation
+* No direct entity exposure
+
+GraphQL resolvers call application services, not repositories.
+
+---
+
+## 6.2 REST (Secondary)
+
+REST is used for:
+
+* Webhooks
+* Internal integrations
+* Health checks
+* Admin endpoints
+
+---
+
+# 7. Authentication & Authorization
+
+## 7.1 Host Authentication
+
+* Account required
+* Email verification
+* Phone verification (OTP)
+
+## 7.2 Hestiae RSVP
+
+* No account required
+* OTP-based verification
+* Scoped token access
+
+## 7.3 Auth Implementation (Decision Pending)
+
+Two viable approaches (pick one and lock it):
+
+* **Option A: AWS Cognito** (fastest to production)
+
+  * Handles phone/email verification flows and JWT issuance
+  * Backend validates JWT and enforces authorization
+
+* **Option B: Custom Auth inside backend**
+
+  * Backend generates/verifies OTP and issues scoped tokens
+  * Uses SNS/Pinpoint for OTP delivery
+
+Either way:
+
+* Authorization decisions must live in application/domain layer.
+
+---
+
+# 8. Database Architecture
+
+## 8.1 Database Choice
+
+* PostgreSQL (managed via AWS RDS)
+
+## 8.2 Migration Strategy
+
+* Flyway required
+* Versioned migrations
+* Dev-only seed data via migration
+* No manual DB edits
+
+---
+
+# 9. Notifications & Async Processing
+
+## 9.1 Why Async is Required
+
+Email/SMS sending must not block request threads.
+
+Rule:
+
+* API request publishes a job → worker processes it.
+
+## 9.2 Queueing
+
+* **SQS** holds jobs such as:
+
+  * send hestia email
+  * send OTP
+  * send reminder
+  * webhook delivery (future)
+
+### Two-Queue Topology (Email Routing)
+
+Two SQS queues with different priority/retry semantics:
+
+| Queue | Purpose | Visibility Timeout | Message Types |
+|-------|---------|-------------------|---------------|
+| **OTP queue** | Time-sensitive, security-critical codes | 30s (fast retry) | `VerificationEmail`, `PasswordResetEmail` |
+| **Invitation queue** | General transactional emails | 60s (bulk-tolerant) | `InvitationEmail`, `RsvpNotificationEmail`, `ReminderEmail`, `AccountDeletionEmail` |
+
+**Routing rule:** Only OTP codes (verification, password reset) go to the OTP queue. All other transactional/informational emails (invitations, notifications, confirmations) go to the invitation queue — even if they are triggered by a security action like account deletion.
+
+**Implementation:** `SqsEmailPublisher` routes by message type; `SqsEmailConsumer` listens on both queues with separate handlers.
+
+## 9.3 Email
+
+* **SES** is used for transactional emails.
+
+## 9.4 SMS / OTP
+
+* **SNS** (simple) or **Pinpoint** (advanced) for SMS.
+
+## 9.5 Integration Boundary Rule
+
+* No AWS SDK calls in GraphQL resolvers/controllers.
+* All AWS integrations must be behind infrastructure adapters.
+
+---
+
+# 10. Infrastructure & Deployment
+
+## 10.1 Hosting Model
+
+* Dockerized Spring Boot app
+* Deployed on AWS EC2 (ASG in prod)
+* RDS for database
+* Publicly reachable only via ALB
+
+## 10.2 Infrastructure as Code
+
+* Terraform defines:
+
+  * VPC + subnets + routing + NAT
+  * ALB + target groups + listeners
+  * EC2 Launch Template + ASG
+  * RDS + subnet group
+  * ECR
+  * SSM parameters
+  * SQS/SES/SNS resources
+  * CloudWatch alarms
+
+---
+
+# 11. CI/CD Pipeline
+
+## 11.1 Git Strategy
+
+* No direct commits to main
+* Feature branches required
+* PR approval required
+
+## 11.2 Pipeline Steps
+
+1. Build
+2. Unit tests
+3. Integration tests
+4. Docker build
+5. Push image to ECR
+6. Deploy (Dev)
+7. Blue/Green (Prod)
+
+---
+
+# 12. Observability
+
+## 12.1 Logging
+
+* Structured JSON logs
+* No PII
+
+## 12.2 Monitoring
+
+* CloudWatch (baseline)
+* Prometheus + Grafana (optional)
+
+## 12.3 Metrics
+
+* Request latency
+* Error rates
+* RSVP conversion metrics
+* SQS queue depth (if enabled)
+* Notification success/failure rates
+
+---
+
+# 13. Scalability Strategy
+
+* Stateless backend
+* Horizontal scaling via EC2/ASG
+* Load balancer in front
+* DB scaling via RDS vertical scaling (v1)
+
+Future:
+
+* Read replicas
+* Async notification queue (SQS) expansion
+
+---
+
+# 14. Security Baseline
+
+* No secrets in repo
+* Env-based configuration (via SSM)
+* HTTPS only
+* Minimal exposed ports
+* Role-based access
+* DB not publicly exposed
+
+---
+
+# 15. Compliance Awareness
+
+* GDPR-conscious data handling
+* Minimal PII storage
+* Data deletion capability
+
+---
+
+# 16. Governance Rules
+
+* Domain boundaries must not be violated
+* JPMS boundaries must be preserved
+* No direct infrastructure calls from GraphQL resolvers
+* No business logic in controllers
+* All DB changes via Flyway
+
+---
+
+# 17. Future Evolution
+
+Planned future capabilities:
+
+* Payment gateway
+* Feature flags
+* Microservices extraction
+* Event-driven notifications
+* Horizontal DB scaling
+
+---
+
+# Final Architectural Principle
+
+> Keep the backend boring, predictable, observable, and evolvable.
+
+If a solution increases hidden complexity without clear benefit, it must be rejected.

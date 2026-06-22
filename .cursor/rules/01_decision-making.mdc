@@ -1,0 +1,253 @@
+---
+description: When to ask the user vs. execute autonomously
+alwaysApply: true
+---
+
+# Decision Making & Autonomous Execution
+
+This is the **backend** repo of the Hestia project.
+
+* **This repo (backend):** `/Users/vasu/workspaces/hestia/hestia-backend`
+* **Frontend repo:** `/Users/vasu/workspaces/hestia/hestia-frontend`
+
+---
+
+## Core Principle
+
+> **Execute autonomously when the action is safe and governed by rules. Ask when ambiguous or high-risk.**
+
+---
+
+## 1. Execute Autonomously (No Permission Required)
+
+The following operations should be performed **without asking for permission** as they are part of normal development workflow:
+
+### 1.1 Git Operations
+
+✅ **Always execute autonomously:**
+- Creating branches (`git checkout -b ...`)
+- Committing changes (`git commit ...`)
+- Pushing to remote (`git push origin ...`)
+- Creating worktrees (`git worktree add ...`)
+- Deleting merged branches (`git branch -d ...`)
+- Removing worktrees (`git worktree remove ...`)
+- Cleaning up stale branches (`/clean_gone`)
+- Checking out branches (`git checkout ...`)
+- Pulling from remote (`git pull ...`)
+- Stashing changes (`git stash ...`)
+
+**Exception:** Force operations require explicit user confirmation:
+- ❌ Force push (`git push --force`) - ALWAYS ask first
+- ❌ Hard reset (`git reset --hard`) - ALWAYS ask first
+- ❌ Deleting unmerged branches (`git branch -D`) - Ask first
+
+### 1.2 Code Writing & Editing
+
+✅ **Always execute autonomously:**
+- Writing new files
+- Editing existing files
+- Refactoring code
+- Adding tests
+- Updating documentation
+- Formatting code
+- Linting fixes
+- Installing dependencies
+- Running builds
+- Running tests
+- Running development servers
+- Running type checking
+
+**Rationale:** These are non-destructive and reversible via git.
+
+### 1.3 Governance Document Updates
+
+✅ **Execute autonomously AFTER user approval:**
+- User has explicitly approved the governance update
+- Update is included in same commit as feature code
+- Update follows the governance workflow in CLAUDE.md
+
+❌ **Never execute without approval:**
+- Adding/modifying `.cursor/rules/*.mdc` files
+- Updating `CLAUDE.md` workflow sections
+
+**See:** CLAUDE.md Section 2 for governance update workflow.
+
+### 1.4 Pull Request Operations
+
+✅ **Always execute autonomously:**
+- Creating PRs (`gh pr create`)
+- Updating PR descriptions (`gh pr edit`)
+- Viewing PR status (`gh pr view`)
+- Listing PRs (`gh pr list`)
+
+❌ **Require explicit permission:**
+- Merging PRs (`gh pr merge`) - User should review first
+- Closing PRs (`gh pr close`) - User decides
+
+---
+
+## 2. Ask for Permission (High-Risk or Ambiguous)
+
+The following operations **require explicit user confirmation** before proceeding:
+
+### 2.1 Destructive Git Operations
+
+❌ **ALWAYS ask first:**
+- Force push to main/master branch
+- Force push to any branch
+- Hard reset (`git reset --hard`)
+- Deleting unmerged branches
+- Rebasing published commits
+- Amending pushed commits
+
+### 2.2 Production/Deployment Operations
+
+❌ **ALWAYS ask first:**
+- Deploying to production
+- Publishing packages
+- Merging to main/master branch
+- Triggering CI/CD pipelines manually
+
+### 2.3 Security & Credentials
+
+❌ **ALWAYS ask first:**
+- Modifying `.env` files
+- Changing authentication config
+- Updating API keys or secrets
+- Modifying security headers
+- Changing CORS settings
+
+### 2.4 Breaking Changes
+
+❌ **ALWAYS ask first:**
+- Removing public APIs
+- Changing API schemas (breaking)
+- Modifying database migrations
+- Changing environment variable names
+- Renaming widely-used files/functions
+
+### 2.5 Ambiguous Requirements
+
+❌ **ALWAYS ask when:**
+- User request can be interpreted multiple ways
+- Multiple valid implementation approaches exist
+- Architecture decisions affect multiple features
+- Unclear what "done" looks like
+- User hasn't specified important details
+
+**When in doubt: ASK. Don't guess or hallucinate.**
+
+---
+
+## 3. Decision Tree
+
+**Before taking action, ask:**
+
+1. **Is this a standard development operation?**
+   - ✅ Yes → Execute autonomously (git, code, tests, docs)
+   - ❌ No → Continue to step 2
+
+2. **Is this destructive or irreversible?**
+   - ✅ Yes → ASK for permission
+   - ❌ No → Continue to step 3
+
+3. **Is the requirement clear and unambiguous?**
+   - ✅ Yes → Execute autonomously
+   - ❌ No → ASK for clarification
+
+4. **Does this affect production or security?**
+   - ✅ Yes → ASK for permission
+   - ❌ No → Execute autonomously
+
+---
+
+## 4. Examples
+
+### Example 1: Autonomous Execution
+
+```
+User: "Fix the typo in the README"
+
+Action: Read README → Edit typo → Commit → Push
+No permission needed - standard code edit
+```
+
+### Example 2: Autonomous Execution
+
+```
+User: "Create a PR for the user authentication feature"
+
+Action: Run tests → Create PR with description → Push
+No permission needed - standard git workflow
+```
+
+### Example 3: Ask for Permission
+
+```
+User: "Deploy the API to production"
+
+Claude: "I can create a production deployment. Should I:
+1. Deploy to production now
+2. Create a release candidate first
+3. Wait for your approval after review"
+
+Wait for user response.
+```
+
+### Example 4: Ask for Clarification
+
+```
+User: "Add validation to the endpoint"
+
+Claude: "I can add validation. Should I:
+1. Add request validation (input DTOs)
+2. Add business logic validation (service layer)
+3. Add both request and business validation"
+
+Wait for user response.
+```
+
+### Example 5: Autonomous Execution
+
+```
+User: "Clean up the git branches before starting the new ticket"
+
+Action: git worktree list → git branch -vv → /clean_gone
+No permission needed - standard workflow per governance rules
+```
+
+---
+
+## 5. Summary Table
+
+| Operation | Permission Required | Rationale |
+|-----------|-------------------|-----------|
+| git commit/push | ❌ No | Standard workflow, reversible |
+| git push --force | ✅ Yes | Destructive, affects others |
+| Edit code | ❌ No | Reversible via git |
+| Create PR | ❌ No | Standard workflow |
+| Merge PR | ✅ Yes | User should review first |
+| Deploy to prod | ✅ Yes | High-risk operation |
+| Update .env | ✅ Yes | Security implications |
+| Add tests | ❌ No | Standard development |
+| Breaking API change | ✅ Yes | Affects consumers |
+| Ambiguous requirement | ✅ Yes | Need clarification |
+| Clean up branches | ❌ No | Standard workflow |
+| Format code | ❌ No | Non-destructive |
+
+---
+
+## 6. User Preference Override
+
+**This user has explicitly requested:**
+- ✅ Execute git operations autonomously (no permission for commits, pushes, branches)
+- ✅ Execute code writing autonomously (no permission for edits, new files)
+- ✅ Execute PR creation autonomously
+
+**Still require permission for:**
+- Destructive git operations (force push, hard reset)
+- Production deployments
+- Security changes
+- Ambiguous requirements
+
+When in doubt: **Execute autonomously if governed by rules, ASK if high-risk or ambiguous.**

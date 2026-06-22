@@ -1,0 +1,218 @@
+---
+
+description: Rate limiting strategy — two-layer defense (WAF + application), per-endpoint limits, and implementation patterns
+alwaysApply: true
+-----------------
+
+# Rate Limiting Strategy — Complete Reference
+
+This document is the authoritative reference for all rate limiting in the Hestia application.
+
+## Architecture: Two-Layer Defense
+
+```
+Request from browser/app
+  |
+  v
+Layer 1: CloudFront WAF (edge)
+  |-- Blocks at CDN edge, request never reaches backend
+  |-- Per-IP rate limiting (no resource-level granularity)
+  |-- AWS-managed, survives deploys/restarts
+  |-- Returns 429 with JSON error body
+  |
+  v
+Layer 2: Application Rate Limiter (Spring Boot)
+  |-- Blocks at app level, request reaches backend but doesn't write to DB
+  |-- Per-IP + per-resource granularity (e.g., per invitation ID)
+  |-- In-memory (ConcurrentHashMap), resets on deploy
+  |-- Returns success silently (fire-and-forget endpoints) or throws exception
+  |
+  v
+Layer 3: Database Idempotency (PostgreSQL)
+  |-- Final safety net for data integrity
+  |-- WHERE clauses, unique constraints, atomic increments
+  |-- Always active, no configuration needed
+```
+
+### Why Both Layers?
+
+- **WAF alone isn't enough**: Can't rate-limit per resource ID. An attacker with 1 IP sending 10 requests for 1,000 different invitations = 10,000 requests, all passing WAF.
+- **App alone isn't enough**: Every request hits EC2 compute + opens a DB connection. On t4g.micro (1GB RAM), high volume burns CPU and connection pool even if the rate limiter drops requests.
+- **Together**: WAF caps total volume at the edge. App caps per-resource abuse. DB prevents data corruption as the final net.
+
+---
+
+## Layer 1: WAF Rate Limits (CloudFront Edge)
+
+**Files:** `terraform/infra/waf.tf` and `terraform/prod/waf.tf` (in the frontend repo)
+
+| Priority | Rule Name | Rate Limit | Scope | Protects |
+|---|---|---|---|---|
+| 1 | `rsvp-rate-limit` | 10 req / 5 min per IP | Body contains `rsvpViaEventLink` | Public RSVP submissions |
+| 2 | `registration-rate-limit` | 10 req / 5 min per IP | Body contains `registerUser` | Account creation |
+| 3 | `login-rate-limit` | 10 req / 5 min per IP | Body contains `Login` | Authentication |
+| 4 | `create-event-rate-limit` | 20 req / 5 min per IP | Body contains `createEvent` | Event creation |
+| 5 | `view-tracking-rate-limit` | 10 req / 5 min per IP | Body contains `recordInvitationView` OR `recordPublicLinkView` | View tracking (INV-212) |
+| 6 | `blanket-graphql-rate-limit` | 100 req / 1 min per IP | ALL `/graphql` POST requests | Catch-all for unlisted operations |
+
+### WAF Rule Pattern
+
+All WAF rules follow the same structure:
+- `rate_based_statement` with `aggregate_key_type = "IP"`
+- `scope_down_statement` using `byte_match_statement` on the POST body
+- `CONTAINS` matching on the GraphQL operation name
+- Block action returns **429** (not 403) with JSON error body matching GraphQL error format
+- `Retry-After: 300` header
+- CloudWatch metrics enabled for monitoring
+
+### Adding a New WAF Rule
+
+1. Add the rule block to BOTH `terraform/infra/waf.tf` and `terraform/prod/waf.tf`
+2. Use the next available priority number
+3. Bump the blanket rule priority to stay last
+4. Match on the GraphQL `operationName` in the POST body
+5. Use `or_statement` if multiple operations share the same limit
+6. Run `terraform plan` to verify, then `terraform apply`
+
+---
+
+## Layer 2: Application Rate Limits (Spring Boot)
+
+| Component | Location | Rate Limit | Key | Behavior on Limit |
+|---|---|---|---|---|
+| `PublicRsvpService` | `hestia-invitation/application/` | 100 req / 1 hour per token | `UUID token` | Throws `IllegalStateException` |
+| `InMemoryLoginRateLimiter` | `hestia-user/application/` | 10 failed attempts / 15 min per IP (prod), 100 (dev) | `String ipAddress` | Returns `isBlocked() = true` |
+| `InMemoryViewTrackingRateLimiter` | `hestia-invitation/application/` | 10 req / 1 hour per (IP hash + resource) | `"inv:" + id + ":" + ipHash` or `"pub:" + token + ":" + ipHash` | Returns `isAllowed() = false` |
+
+### Implementation Pattern
+
+All application rate limiters follow this pattern:
+
+```java
+// Interface (port in application layer)
+public interface XxxRateLimiter {
+    boolean isAllowed(String key);  // or isBlocked() — inverted semantics
+}
+
+// Implementation (also in application layer, @Component)
+@Component
+public class InMemoryXxxRateLimiter implements XxxRateLimiter {
+    private final ConcurrentHashMap<String, ConcurrentLinkedDeque<Long>> windows =
+        new ConcurrentHashMap<>();
+
+    @Override
+    public boolean isAllowed(String key) {
+        ConcurrentLinkedDeque<Long> timestamps =
+            windows.computeIfAbsent(key, k -> new ConcurrentLinkedDeque<>());
+        synchronized (timestamps) {
+            // 1. Evict expired entries
+            // 2. Check count against limit
+            // 3. Add timestamp if under limit
+        }
+    }
+
+    @Scheduled(fixedRate = 3600000) // hourly cleanup
+    void evictExpired() {
+        // Remove entries with all-expired timestamps
+    }
+}
+```
+
+### Critical Implementation Rules
+
+1. **Use `ConcurrentLinkedDeque<Long>`** (not `Deque<Instant>`) — thread-safe, matches existing pattern
+2. **Use `synchronized(timestamps)`** on compound check-then-add operations — prevents TOCTOU race
+3. **Add `@Scheduled` eviction** — prevents unbounded memory growth on long-running instances
+4. **Hash IPs with SHA-256 + salt** — GDPR compliance, never store or log raw IPs
+5. **IP hash salt** from `application.yml`: `hestia.rate-limit.ip-hash-salt` (must be high-entropy in production)
+6. **Handle null IP gracefully** — when `clientIpAddress` context is null (no X-Forwarded-For), either drop the request or use a fallback strategy
+7. **Admin/test user exemption** — check lazily, only when limit is hit (avoids DB roundtrip on every request)
+
+### IP Hashing
+
+```java
+// Pattern for hashing client IP before use as rate limiter key
+String ipHash = sha256(ipHashSalt + clientIp);
+String key = "prefix:" + resourceId + ":" + ipHash;
+```
+
+- Salt configured via `@Value("${hestia.rate-limit.ip-hash-salt:default-dev-salt}")`
+- Use `MessageDigest.getInstance("SHA-256")` (matches existing patterns in EmailVerificationServiceImpl)
+- Never log the raw IP — log truncated hash (first 8 chars) for debugging
+- In production, the salt MUST be a high-entropy random value stored in SSM
+
+---
+
+## Layer 3: Database Idempotency (PostgreSQL)
+
+These are not "rate limits" per se, but they provide the final data integrity guarantee:
+
+| Operation | SQL Guard | Effect |
+|---|---|---|
+| `setFirstViewedAt` | `WHERE first_viewed_at IS NULL` | Only the first write succeeds; subsequent writes are no-ops |
+| `incrementPublicLinkViewCount` | `SET count = count + 1` | Atomic increment, no lost updates under concurrency |
+| Unique constraints | `ON CONFLICT DO NOTHING` / `UNIQUE` indexes | Prevents duplicate records |
+
+---
+
+## Adding Rate Limiting to a New Endpoint
+
+### Checklist
+
+1. **Determine the threat model**: Who can call this? Authenticated or unauthenticated? What's the abuse scenario?
+2. **Choose the limits**:
+   - WAF: per-IP, minimum 10 req/5min (AWS minimum)
+   - App: per-IP+resource, typically 10-100 req/hour
+3. **Add WAF rule** to both `terraform/infra/waf.tf` and `terraform/prod/waf.tf`
+4. **Add app-level rate limiter** if per-resource granularity is needed
+5. **Add DB-level idempotency** where applicable (set-once patterns, unique constraints)
+6. **Update this document** with the new limits
+7. **Add IT test** for the rate-limited behavior
+
+### Decision Guide
+
+| Scenario | WAF Only? | App + WAF? | DB Only? |
+|---|---|---|---|
+| Authenticated, low-volume mutation | WAF only | — | — |
+| Unauthenticated, fire-and-forget | WAF + App | WAF + App | DB idempotency |
+| Unauthenticated, data-critical | WAF + App | WAF + App + DB | Always |
+| Internal/admin endpoint | — | — | Maybe |
+
+---
+
+## Monitoring & Observability
+
+### WAF Metrics (CloudWatch)
+
+Each WAF rule has `cloudwatch_metrics_enabled = true`. Monitor:
+- `hestia-{env}-rsvp-rate-limit` — RSVP abuse attempts
+- `hestia-{env}-registration-rate-limit` — Registration spam
+- `hestia-{env}-login-rate-limit` — Brute force login attempts
+- `hestia-{env}-view-tracking-rate-limit` — View tracking abuse
+- `hestia-{env}-blanket-graphql-rate-limit` — General API abuse
+
+### Application Logging
+
+Rate limiters log at these levels:
+- `INFO` on initialization: config values, max requests, window size
+- `DEBUG` when a request is rate-limited: key (truncated), limit hit
+- `WARN` when IP is null (rate limiting bypassed/dropped)
+- `WARN` for invalid UUIDs (potential scanning/abuse)
+
+### Structured Log Pattern
+
+```
+VIEW_TRACK rate-limited: inv=cc120212... ip=a1b2c3d4 (first 8 chars of hash)
+VIEW_TRACK clientIp is null — dropping request for inv=cc120212...
+VIEW_TRACK invalid invitation UUID: not-a-uuid
+```
+
+---
+
+## Known Limitations
+
+1. **In-memory rate limiters reset on deploy** — a deploy creates a brief window where all limits are refreshed. WAF provides continuity during this window.
+2. **WAF minimum window is 5 minutes** — cannot enforce sub-5-minute windows at the edge.
+3. **WAF cannot rate-limit per resource** — only per IP. An attacker sending unique resource IDs from one IP is caught by WAF, but an attacker sending the same resource ID from many IPs is only caught by the app-level limiter.
+4. **IP rotation bypasses both WAF and app rate limiters** — distributed attacks with many IPs are not fully mitigated. DB idempotency is the final defense.
+5. **Mobile native session dedup is deferred** (INV-215) — `sessionStorage` guard only works on web. Native apps may re-fire mutations on component remount.

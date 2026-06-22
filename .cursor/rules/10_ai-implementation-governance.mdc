@@ -1,0 +1,708 @@
+---
+description: AI-assisted implementation governance: quality over speed, reliability over duplication, maintainability over local completion
+globs:
+alwaysApply: true
+---
+
+# AI-Assisted Development Coding Standard
+
+## Theme
+
+Quality over speed.
+Reliability over duplication.
+Maintainability over local completion.
+System coherence over fast code generation.
+
+AI agents must not optimize only for completing the current task. They must preserve the long-term health, reliability, architecture, and maintainability of the codebase.
+
+This document exists because AI-assisted development commonly introduces implementation-stage risks such as duplicate logic, architectural drift, over-abstraction, weak tests, security regressions, dependency sprawl, naming entropy, and hidden technical debt.
+
+---
+
+# 1. Core Operating Principle
+
+Before writing code, the agent must assume:
+
+> The codebase may already contain an implementation, pattern, utility, service, hook, component, validator, mapper, test helper, or architecture convention for this requirement.
+
+The agent must search, inspect, and reason before creating new code.
+
+The agent must prefer:
+
+1. Reuse existing code
+2. Extend existing code
+3. Refactor existing code safely
+4. Create minimal new code
+5. Create new abstraction only with clear justification
+
+The agent must not create new code just because it is faster.
+
+---
+
+# 2. Mandatory Pre-Implementation Workflow
+
+Before implementation, the agent must produce a short plan containing:
+
+```text
+Implementation Plan
+
+1. Requirement understanding
+2. Existing code/patterns to inspect
+3. Reuse / extend / refactor / create-new decision
+4. Expected files or modules impacted
+5. Architecture boundary risks
+6. Security and reliability risks
+7. Test strategy
+```
+
+The agent must update the plan if repository discovery changes the approach.
+
+---
+
+# 3. Search-Before-Create Rule
+
+Before creating any new:
+
+- file
+- class
+- interface
+- function
+- method
+- hook
+- component
+- utility
+- validator
+- mapper
+- DTO
+- API client
+- service
+- repository
+- module
+- test helper
+- dependency
+- abstraction
+
+The agent must search for existing equivalents.
+
+Required search areas:
+
+- Similar business terminology
+- Similar technical terminology
+- Existing utilities/helpers
+- Existing services/hooks/components
+- Existing validators/mappers/DTOs
+- Existing tests and fixtures
+- Existing architecture docs or ADRs
+- Nearby module conventions
+- Shared/common packages
+
+The agent must document:
+
+```text
+Existing code checked:
+- ...
+
+Reusable or related code found:
+- ...
+
+Decision:
+- Reuse / Extend / Refactor / Create New
+
+Reason:
+- ...
+```
+
+If this analysis is missing, implementation is not complete.
+
+---
+
+# 4. Problem: Duplicate Logic Explosion
+
+AI agents often create multiple implementations of the same concept.
+
+Examples:
+
+- Multiple utilities doing nearly the same thing
+- Duplicate validators
+- Duplicate API clients
+- Duplicate hooks/services
+- Duplicate formatting/date logic
+- Duplicate authorization checks
+- Duplicate mapping logic
+- Duplicate test setup
+
+## Rule
+
+The agent must not duplicate existing logic.
+
+Before implementing logic, the agent must verify whether the behavior already exists.
+
+If similar logic exists, the agent must either:
+
+- reuse it,
+- extend it,
+- consolidate it,
+- or explain why it cannot be reused.
+
+Duplicate logic is considered a defect unless explicitly justified.
+
+---
+
+# 5. Problem: Architectural Boundary Violations
+
+AI agents often take the shortest path and bypass architecture.
+
+Examples:
+
+- UI directly calling low-level APIs incorrectly
+- React components containing orchestration-heavy business logic
+- GraphQL resolvers/controllers containing business logic
+- Domain logic placed in infrastructure classes
+- Repositories doing orchestration
+- Shared modules depending on feature modules
+- Feature modules bypassing approved abstractions
+
+## Rule
+
+The agent must preserve architecture boundaries even when a shortcut would be faster.
+
+Before modifying code, the agent must identify:
+
+- owning module/domain,
+- correct layer for the change,
+- existing boundary rules,
+- dependency direction,
+- and whether the change leaks responsibility across layers.
+
+## Backend Guidance
+
+- Controllers/resolvers should delegate; they should not own business rules.
+- Application/domain services should own business orchestration.
+- Repositories should perform persistence concerns, not workflow orchestration.
+- Infrastructure adapters should not contain domain policy.
+- Shared modules must remain independent of feature modules.
+
+## Frontend Guidance
+
+- Components should not become business workflow engines.
+- API calls should go through approved clients/hooks/services.
+- Shared UI should not contain feature-specific rules.
+- State management must follow existing project conventions.
+- Validation must use existing project patterns.
+
+---
+
+# 6. Problem: Over-Abstraction and Premature Generalization
+
+AI agents often create abstractions too early.
+
+Examples:
+
+- Generic managers
+- Generic processors
+- Base classes
+- Mega hooks
+- Over-configurable utilities
+- Framework-like abstractions for one use case
+- Abstract factories without real need
+
+## Rule
+
+The agent must not create abstractions unless they clearly reduce complexity.
+
+A new abstraction is allowed only when:
+
+- there are multiple real use cases,
+- ownership is clear,
+- naming is clear,
+- complexity is reduced,
+- future maintenance becomes easier,
+- and business meaning is not hidden.
+
+Prefer simple, explicit code over speculative reuse.
+
+---
+
+# 7. Problem: "Looks Correct" Code
+
+AI-generated code can compile and look professional while violating hidden assumptions.
+
+Examples:
+
+- Timezone bugs
+- Transaction bugs
+- Missing authorization
+- Incorrect edge cases
+- Race conditions
+- Incorrect retry behavior
+- Wrong cache assumptions
+- Invalid business rule interpretation
+
+## Rule
+
+The agent must not treat compilable code as correct code.
+
+The agent must explicitly check:
+
+- business rules,
+- edge cases,
+- failure cases,
+- security rules,
+- transaction behavior,
+- concurrency behavior,
+- data integrity,
+- and existing assumptions in nearby code.
+
+Correctness must be proven through reasoning and tests, not appearance.
+
+---
+
+# 8. Problem: Hallucinated Consistency
+
+AI agents often assume the repository is more consistent than it really is.
+
+Examples:
+
+- Assuming all services follow one pattern
+- Assuming all APIs use the same DTO style
+- Assuming all repositories use the same convention
+- Assuming a project-wide architecture without verifying it
+
+## Rule
+
+The agent must verify patterns from actual code before following them.
+
+Bad:
+
+```text
+This project likely uses pattern X, so I created a new implementation using pattern X.
+```
+
+Good:
+
+```text
+I inspected modules A, B, and C. They use pattern X for this concern, so I extended the same approach.
+```
+
+The agent must not invent architecture.
+
+---
+
+# 9. Problem: Silent Security Regressions
+
+AI agents can accidentally weaken security while implementing features.
+
+Examples:
+
+- Missing authorization checks
+- Missing ownership checks
+- Exposing sensitive fields
+- Logging sensitive data
+- Trusting frontend validation
+- Unsafe token handling
+- Insecure CORS/CSRF changes
+- Query injection risks
+- SSRF risks
+- Privilege escalation paths
+
+## Rule
+
+Any change touching user data, permissions, authentication, APIs, files, payments, notifications, or external systems must include a security review.
+
+The agent must check:
+
+- authentication,
+- authorization,
+- ownership validation,
+- input validation,
+- output exposure,
+- sensitive logging,
+- token/session safety,
+- injection risks,
+- and privilege escalation risks.
+
+Frontend-only validation is never enough.
+
+---
+
+# 10. Problem: Transaction and State Management Bugs
+
+AI agents often miss state consistency issues.
+
+Examples:
+
+- Partial writes
+- Missing rollback behavior
+- Duplicate event handling
+- Race conditions
+- Incorrect async flow
+- Broken idempotency
+- Retry causing duplicate side effects
+- Timeout leaving inconsistent state
+
+## Rule
+
+For any backend, workflow, async, persistence, or stateful change, the agent must evaluate:
+
+- transaction boundaries,
+- rollback behavior,
+- idempotency,
+- retry safety,
+- duplicate request handling,
+- concurrency,
+- partial failure behavior,
+- async/event consistency,
+- and timeout behavior.
+
+The implementation must not be happy-path only.
+
+---
+
+# 11. Problem: Test Inflation with Low Value
+
+AI agents often generate many tests with weak confidence value.
+
+Examples:
+
+- Snapshot spam
+- Excessive mocks
+- Tests coupled to implementation details
+- Tests that only assert a function was called
+- Tests that pass even when behavior is broken
+- High coverage but low confidence
+
+## Rule
+
+Tests must prove behavior, not merely increase coverage.
+
+Good tests should cover:
+
+- business behavior,
+- edge cases,
+- validation failures,
+- authorization failures,
+- integration boundaries,
+- regression scenarios,
+- error handling,
+- and meaningful user-visible outcomes.
+
+Avoid tests that only verify internal implementation details.
+
+Coverage percentage is not the goal. Confidence is the goal.
+
+---
+
+# 12. Problem: Context Fragmentation
+
+AI agents can forget previous decisions, project standards, or architectural direction.
+
+Examples:
+
+- Introducing REST when the project standardized on GraphQL
+- Creating a new validation pattern after one already exists
+- Reintroducing decisions that were previously rejected
+- Ignoring architecture docs or governance files
+- Violating module boundaries because context was missing
+
+## Rule
+
+The agent must inspect persistent project guidance before implementation.
+
+Relevant guidance may include:
+
+- README files
+- architecture docs
+- ADRs
+- Cursor rules
+- Claude/Codex instructions
+- test strategy docs
+- module documentation
+- existing implementation conventions
+
+The agent must not rely only on the current prompt or nearby file context.
+
+---
+
+# 13. Problem: Dependency Explosion
+
+AI agents often add libraries when existing code or native APIs are sufficient.
+
+Examples:
+
+- Adding utility libraries for small functions
+- Adding SDKs without approval
+- Adding UI packages for one component
+- Adding date libraries when one already exists
+- Adding testing tools unnecessarily
+
+## Rule
+
+The agent must not add dependencies casually.
+
+A new dependency is allowed only when:
+
+- existing dependencies cannot solve the problem,
+- native/platform APIs are insufficient,
+- maintenance risk is acceptable,
+- security risk is acceptable,
+- license is acceptable,
+- bundle/runtime impact is acceptable,
+- and the dependency is clearly justified.
+
+The agent must document:
+
+```text
+New dependency required: yes/no
+
+Reason:
+- ...
+
+Alternatives considered:
+- ...
+
+Impact:
+- ...
+```
+
+Default: do not add dependencies.
+
+---
+
+# 14. Problem: Inconsistent Coding Philosophy
+
+AI agents adapt to local context and may create inconsistent styles across modules.
+
+Examples:
+
+- Functional style in one module, OOP in another, procedural elsewhere
+- Different error styles for similar flows
+- Different naming styles for same concept
+- Different validation styles across screens/APIs
+- Different state management patterns across features
+
+## Rule
+
+The agent must follow the dominant convention of the owning module and project.
+
+Before implementing, inspect nearby code for:
+
+- naming style,
+- file structure,
+- error handling,
+- testing style,
+- dependency usage,
+- layering,
+- and abstraction level.
+
+The goal is consistency, not personal preference.
+
+---
+
+# 15. Problem: Refactoring Avoidance
+
+AI agents often avoid refactoring and instead add more code around existing problems.
+
+Examples:
+
+- Adding another helper instead of consolidating two helpers
+- Adding another branch instead of simplifying flow
+- Creating a new service instead of extending the correct one
+- Working around bad structure instead of improving it
+
+## Rule
+
+The agent should prefer small, safe refactoring when it reduces long-term complexity.
+
+Preferred actions:
+
+- delete duplicate code,
+- consolidate utilities,
+- move logic to the correct owner,
+- improve names,
+- simplify flow,
+- reduce unnecessary indirection,
+- and make future changes easier.
+
+Do not add architectural sediment unless necessary.
+
+---
+
+# 16. Problem: Poor Naming Drift
+
+AI agents often introduce many vague names for similar responsibilities.
+
+Examples:
+
+- UserService
+- UserManager
+- UserCoordinator
+- UserProcessor
+- UserHelper
+- UserUtil
+- UserHandler
+
+## Rule
+
+Names must clearly communicate responsibility and ownership.
+
+Avoid vague names such as:
+
+- Manager
+- Helper
+- Processor
+- Handler
+- Common
+- Util
+- Generic
+- Base
+
+unless the repository already has a clear convention for them.
+
+A good name should answer:
+
+- What domain owns this?
+- What responsibility does it have?
+- What responsibility does it not have?
+
+Naming drift is architectural debt.
+
+---
+
+# 17. Problem: Invisible Technical Debt
+
+AI-generated technical debt often looks polished.
+
+Examples:
+
+- Code looks clean but duplicates existing behavior
+- Tests pass but validate little
+- Abstractions look enterprise-grade but hide simple logic
+- Security gaps are not obvious in review
+- Maintenance cost appears only months later
+
+## Rule
+
+The agent must review for hidden debt, not just visible correctness.
+
+Before finalizing, the agent must ask:
+
+- Did this increase system complexity?
+- Did this create another way to do the same thing?
+- Did this make future changes easier or harder?
+- Did this hide business rules behind generic code?
+- Did this introduce maintenance burden?
+- Did this reduce clarity?
+
+The best implementation may be the one that adds the least code.
+
+---
+
+# 18. Problem: Feature Velocity Greater Than System Understanding
+
+AI can make code change faster than humans can understand the system.
+
+This is dangerous because the repository may evolve beyond the team's ability to reason about it.
+
+## Rule
+
+The agent must preserve human understandability.
+
+Implementation should be:
+
+- readable,
+- traceable,
+- easy to review,
+- easy to test,
+- easy to delete,
+- and aligned with existing mental models.
+
+The agent must not trade system clarity for faster feature delivery.
+
+---
+
+# 19. Mandatory Final Self-Review
+
+Before final response, the agent must complete this checklist:
+
+```text
+Final Self-Review
+
+- Did I search for existing code before creating new code?
+- Did I avoid duplicate logic?
+- Did I preserve architecture boundaries?
+- Did I avoid hallucinated patterns?
+- Did I avoid unnecessary abstraction?
+- Did I avoid unnecessary dependencies?
+- Did I preserve security checks?
+- Did I consider transaction/state/reliability risks?
+- Did I create meaningful tests instead of coverage-only tests?
+- Did I follow existing coding philosophy?
+- Did I avoid naming drift?
+- Did I refactor or consolidate where appropriate?
+- Did I avoid invisible technical debt?
+- Is this implementation understandable to future maintainers?
+```
+
+If any answer is "No," the agent must explain why.
+
+---
+
+# 20. Definition of Done
+
+A task is not complete unless:
+
+- Existing code was searched
+- Reuse was preferred over creation
+- Duplicate logic was avoided
+- Architecture boundaries were preserved
+- Security implications were evaluated
+- Reliability and state risks were considered
+- Tests validate meaningful behavior
+- No unnecessary dependencies were added
+- Naming is clear and consistent
+- Refactoring/consolidation was considered
+- Hidden technical debt was reviewed
+- Human maintainability was prioritized
+
+---
+
+# 21. Agent Behavior Rules
+
+The agent must not:
+
+- jump directly into implementation,
+- create new files by default,
+- duplicate existing logic,
+- hallucinate architecture,
+- introduce speculative abstractions,
+- add dependencies casually,
+- bypass architectural layers,
+- write shallow tests for coverage only,
+- ignore security,
+- ignore transaction/state risks,
+- introduce vague naming,
+- or optimize for speed over maintainability.
+
+The agent must:
+
+- search first,
+- reuse first,
+- extend before creating,
+- refactor when it reduces complexity,
+- preserve boundaries,
+- explain tradeoffs,
+- minimize code surface area,
+- improve maintainability,
+- favor reliability,
+- and ask for clarification when architecture is ambiguous.
+
+---
+
+# Final Principle
+
+Code generation is cheap.
+
+System coherence is expensive.
+
+The agent's job is not merely to produce code.
+The agent's job is to protect the long-term reliability, clarity, and maintainability of the system while implementing the requested change.

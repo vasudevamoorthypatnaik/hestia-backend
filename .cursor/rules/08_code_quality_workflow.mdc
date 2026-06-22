@@ -1,0 +1,444 @@
+---
+description: Code quality workflows and automated checks
+alwaysApply: true
+---
+
+# Code Quality Workflow — Authoritative
+
+**Audience:** Cursor (entry-level engineer), human developers
+**Role Perspective:** Senior Staff Quality Engineer
+**Scope:** Code review, pre-commit hooks, automated quality checks
+**Primary Goal:** Catch bugs before they reach git history
+
+---
+
+## 0. Technology Stack (NON-NEGOTIABLE)
+
+- **Code Formatting:** Spotless Maven Plugin (Google Java Format with AOSP style)
+- **Git Hooks:** Native Git hooks in `.githooks/` directory (no npm/husky)
+- **Code Review Agent:** `feature-dev:code-reviewer` (Claude Code skill)
+- **Static Analysis:** ArchUnit (architecture tests), SpotBugs (future)
+- **Hook Installation:** `.githooks/setup.sh` configures `core.hooksPath`
+
+If any tool or pattern is unclear → **STOP AND ASK**.
+
+---
+
+## 1. Core Principles (NON-NEGOTIABLE)
+
+1. **Proactive Code Review:** ALWAYS run code review BEFORE creating commits, not after.
+2. **Catch Bugs Early:** Issues caught in code review are 10x cheaper to fix than production bugs.
+3. **Non-Blocking Reminders:** Governance reminders run first, blocking checks run last.
+4. **Consistent Formatting:** All code MUST pass Spotless check before commit.
+5. **Hook Transparency:** Git hooks are tracked in repo (`.githooks/`), not developer-local.
+
+Violating these principles introduces technical debt and production bugs.
+
+---
+
+## 2. Proactive Code Review Workflow (MANDATORY)
+
+### 2.1 Claude Code Workflow
+
+**Pattern:** Claude MUST run code review agent before creating ANY commit.
+
+**Implementation:**
+1. **Stage changes:** `git add <files>`
+2. **Run code review:** `Task(subagent_type: "feature-dev:code-reviewer")`
+3. **Review scope:** All staged changes (or all uncommitted if nothing staged)
+4. **If issues found:**
+   - Report issues grouped by severity (critical, high, medium, low)
+   - Ask user: "Fix these issues using Ralph Loop?"
+   - User can choose to fix immediately or proceed anyway
+5. **If no issues or after fixes:**
+   - Proceed with commit creation
+
+**Example:**
+```typescript
+// Before creating commit, always run:
+Task({
+  subagent_type: "feature-dev:code-reviewer",
+  description: "Review staged changes",
+  prompt: "Review all staged changes for bugs, logic errors, and governance violations."
+})
+```
+
+**Evidence this works:**
+- **INV-19 session:** Caught 2 critical data integrity bugs before commit:
+  1. Missing `host_id` column in invitations table → would cause data loss on load
+  2. Missing `createdAt` field in Rsvp domain entity → would corrupt audit trail
+- Both bugs would have reached production without proactive review
+- Fixing before commit = 5 minutes; fixing after deploy = 5 hours
+
+**Why proactive review matters:**
+- Code review BEFORE commit catches bugs in uncommitted code
+- Code review AFTER commit only flags issues in git history
+- Proactive review prevents "oops, let me fix that" commit noise
+
+**Anti-patterns:**
+❌ Creating commits without code review
+❌ Reviewing code AFTER commits are created
+❌ Skipping review for "small changes" (bugs hide in small changes)
+❌ Ignoring critical issues flagged by code review
+
+**Required by:** CLAUDE.md Section "Working Agreement" Rule 4
+
+---
+
+### 2.2 Human Developer Workflow
+
+**Manual code review checklist (before `git commit`):**
+
+1. **Run static analysis:**
+   ```bash
+   mvn verify  # Runs tests + ArchUnit checks
+   ```
+
+2. **Check for common issues:**
+   - Missing null checks on domain value objects
+   - Missing validation on GraphQL inputs
+   - Database migrations missing rollback strategy
+   - Domain layer depending on infrastructure (Spring/JPA annotations)
+   - GraphQL resolvers calling repositories directly (should call services)
+
+3. **Self-review diff:**
+   ```bash
+   git diff --staged  # Review your own changes line-by-line
+   ```
+
+4. **Check governance compliance:**
+   - Updated domain README for domain changes?
+   - Documented database migrations in domain README?
+   - Added tests for GraphQL API changes?
+
+5. **Commit only when:**
+   - All tests pass
+   - All static analysis passes
+   - Self-review complete
+   - Governance checks complete
+
+---
+
+## 3. Git Hooks System
+
+### 3.1 Installation (One-Time Setup)
+
+After cloning the repository:
+
+```bash
+.githooks/setup.sh
+```
+
+This configures Git to use `.githooks/` directory for hooks:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+**Applies to:**
+- ✅ Main repository checkout
+- ✅ All Git worktrees (`.claude/worktrees/*`)
+- ✅ All branches (configuration is per-repository, not per-branch)
+
+**Verification:**
+```bash
+git config --get core.hooksPath  # Should output: .githooks
+```
+
+---
+
+### 3.2 Pre-Commit Hook
+
+**File:** `.githooks/pre-commit`
+
+**Execution order:**
+1. **Governance reminder** (non-blocking, always displays)
+   - Reminds about updating domain READMEs
+   - Reminds about documenting database migrations
+   - Reminds about adding governance learnings
+2. **Spotless check** (blocking, fails commit on formatting errors)
+   - Validates code formatting (Google Java Format with AOSP style)
+   - Fails commit if code is not formatted
+
+**Why this order:**
+- Non-blocking checks run FIRST → always display, even if blocking checks fail
+- Blocking checks run LAST → can fail the commit after reminders display
+- Ensures governance reminders are seen on EVERY commit attempt
+
+**Example output:**
+```bash
+🔍 Running pre-commit checks...
+
+🔍 Governance & Documentation Check:
+
+📋 Governance Updates (.cursor/rules/*.mdc):
+   - Have you identified learnings that should become patterns?
+   - Have you documented new conventions or architecture decisions?
+
+📚 Domain Documentation (src/main/java/com/hestia/*/README.md):
+   - Have you updated the domain README with changes made?
+   - Did you document database schema changes and migrations?
+   - Did you document GraphQL API changes (queries, mutations, errors)?
+
+💡 Reminder: Domain READMEs provide cross-session context.
+
+
+📝 Checking code formatting (Spotless)...
+   ✅ Code formatting passed
+
+✅ Pre-commit checks passed!
+```
+
+---
+
+### 3.3 Bypassing Hooks (Emergency Only)
+
+To skip hooks temporarily (NOT RECOMMENDED):
+
+```bash
+git commit --no-verify -m "Emergency fix"
+```
+
+**⚠️ Warning:** Only use `--no-verify` in emergencies:
+- Spotless has compatibility issues (e.g., Java 21 NoSuchMethodError)
+- Committing non-code files (Markdown, bash scripts)
+- Hotfix deployment to production
+
+**Never use `--no-verify` for:**
+- Regular development workflow
+- "I don't want to format my code"
+- "I don't want to see the governance reminder"
+
+---
+
+## 4. Code Formatting (Spotless)
+
+### 4.1 Auto-Format Before Commit
+
+If Spotless check fails, auto-format your code:
+
+```bash
+mvn spotless:apply
+```
+
+Then stage and commit:
+
+```bash
+git add .
+git commit -m "Your commit message"
+```
+
+---
+
+### 4.2 Spotless Configuration
+
+**Style:** Google Java Format with AOSP (4-space indentation)
+
+**Configured in:** `pom.xml` (parent POM)
+
+```xml
+<plugin>
+    <groupId>com.diffplug.spotless</groupId>
+    <artifactId>spotless-maven-plugin</artifactId>
+    <version>2.44.0</version>
+    <configuration>
+        <java>
+            <googleJavaFormat>
+                <version>1.23.0</version>
+                <style>AOSP</style>
+            </googleJavaFormat>
+        </java>
+    </configuration>
+</plugin>
+```
+
+**Why AOSP style:**
+- 4-space indentation (more readable than 2-space Google style)
+- Industry-standard for Android and Spring Boot projects
+- Consistent with existing Java ecosystem conventions
+
+---
+
+### 4.3 Known Issues
+
+**Spotless Java 21 Compatibility:**
+- **Issue:** Google Java Format has compatibility issue with Java 21
+- **Error:** `NoSuchMethodError: 'java.util.Queue com.sun.tools.javac.util.Log$DeferredDiagnosticHandler.getDiagnostics()'`
+- **Workaround:** Use `--no-verify` for non-code commits (Markdown, bash scripts)
+- **Fix:** Upgrade Google Java Format to version compatible with Java 21 (TODO)
+
+---
+
+## 5. Static Analysis
+
+### 5.1 ArchUnit (Architecture Tests)
+
+**Purpose:** Enforce hexagonal architecture boundaries at compile time.
+
+**Rules enforced:**
+- Domain layer CANNOT depend on infrastructure (Spring, JPA)
+- Domain layer CANNOT depend on application layer
+- Application layer CANNOT depend on infrastructure
+- GraphQL resolvers MUST call application services (not repositories)
+- No cyclic dependencies between modules
+
+**Run architecture tests:**
+```bash
+mvn test -Dtest=ArchitectureTest
+```
+
+**Example violation:**
+```java
+// ❌ BAD: Domain entity with JPA annotations
+@Entity
+public class User {
+    @Id @GeneratedValue
+    private Long id;
+}
+```
+
+```java
+// ✅ GOOD: Pure domain entity
+public class User {
+    private final UserId id;
+    // ...
+}
+```
+
+---
+
+### 5.2 SpotBugs (Future)
+
+**Status:** Not yet configured (TODO)
+
+**Goal:** Catch common Java bugs at compile time:
+- Null pointer dereferences
+- Resource leaks
+- Concurrency issues
+- Security vulnerabilities
+
+---
+
+## 6. Governance Learnings Integration
+
+### 6.1 When to Update Governance Docs
+
+Update governance docs when you discover:
+1. **New patterns** that worked well (should become standard)
+2. **Anti-patterns** caught in code review (should be documented as "don't do this")
+3. **Bug root causes** that could happen again (should be prevented)
+4. **Non-obvious techniques** discovered during implementation
+
+**Examples from INV-19:**
+- ✅ Proactive code review pattern (this document)
+- ✅ Database backfill from related table (added to 06_database_migrations.mdc)
+- ❌ One-off Spotless workaround (not governance-worthy)
+
+---
+
+### 6.2 Governance Learnings Checker Skill
+
+**Use this skill before commits:**
+```bash
+/governance-learnings-checker
+```
+
+**What it does:**
+1. Scans session for patterns and learnings
+2. Checks if learnings are already documented
+3. Proposes updates for gaps
+4. Gets user approval before updating governance docs
+
+**Required by:** CLAUDE.md Section "Working Agreement" Rule 3
+
+---
+
+## 7. Benefits of This Workflow
+
+**Proactive code review:**
+- ✅ Catches bugs before they reach git history
+- ✅ Prevents "oops, let me fix that" commit noise
+- ✅ Evidence: 2 critical bugs caught in INV-19
+
+**Git hooks:**
+- ✅ Consistent code formatting across all developers
+- ✅ Governance reminders visible on every commit
+- ✅ Shared configuration (tracked in Git, not developer-local)
+- ✅ Works seamlessly with Git worktrees
+
+**Static analysis:**
+- ✅ Enforces architectural boundaries (hexagonal architecture)
+- ✅ Catches violations at compile time, not code review time
+- ✅ Prevents domain layer from depending on infrastructure
+
+---
+
+## 8. Troubleshooting
+
+### 8.1 Hooks Not Running
+
+**Symptom:** Pre-commit hook doesn't run on commit
+
+**Fix:**
+```bash
+# Check configuration
+git config --get core.hooksPath  # Should output: .githooks
+
+# If not set, run setup again
+.githooks/setup.sh
+```
+
+---
+
+### 8.2 Permission Denied Errors
+
+**Symptom:** `permission denied: .githooks/pre-commit`
+
+**Fix:**
+```bash
+chmod +x .githooks/pre-commit .githooks/pre-commit-governance-check
+```
+
+---
+
+### 8.3 Spotless Check Fails
+
+**Symptom:** `Code formatting failed` in pre-commit hook
+
+**Fix:**
+```bash
+mvn spotless:apply  # Auto-format code
+git add .            # Stage formatted files
+git commit          # Try again
+```
+
+---
+
+### 8.4 Spotless Java 21 Compatibility Error
+
+**Symptom:** `NoSuchMethodError` during Spotless check
+
+**Workaround (temporary):**
+```bash
+git commit --no-verify -m "Your message"
+```
+
+**Permanent fix (TODO):**
+- Upgrade Google Java Format to Java 21-compatible version
+- See: https://github.com/google/google-java-format/issues/1059
+
+---
+
+## Final Note
+
+Code quality is NOT optional. Proactive code review and automated checks prevent production bugs and technical debt.
+
+**Remember:**
+- ✅ Always run code review BEFORE creating commits
+- ✅ Always run Spotless before committing
+- ✅ Always check governance compliance before committing
+- ✅ Update governance docs when you discover valuable learnings
+
+**Required by:**
+- CLAUDE.md Section "Working Agreement"
+- This governance document (08_code_quality_workflow.mdc)

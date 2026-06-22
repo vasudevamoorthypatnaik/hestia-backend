@@ -1,0 +1,406 @@
+# Backend Testing Strategy (Local-Only, Authoritative) — .mdc
+
+**Audience:** Cursor (entry-level engineer), human developers  
+**Role Perspective:** Senior Staff Testing Engineer  
+**Scope:** LOCAL TESTS ONLY (no CI assumptions)  
+**Primary Goal:** High-signal, behavior-focused backend tests with zero hallucination and clear boundaries
+
+---
+
+## 0. Technology Stack (NON-NEGOTIABLE)
+
+Cursor MUST assume the following stack unless explicitly told otherwise:
+
+- **Language:** Java 21
+- **Framework:** Spring Boot (latest stable 3.x)
+- **API Style:** Spring GraphQL
+- **Build Tool:** Maven
+- **Database:** PostgreSQL
+- **Migrations:** Flyway
+- **Unit Testing:** JUnit 5
+- **Mocking:** Mockito (CLASSIC ONLY)
+- **Integration DB:** Testcontainers (PostgreSQL only)
+- **AWS Testing:** Mock by default, LocalStack by exception only
+
+If any tool, version, or responsibility is unclear → **STOP AND ASK**.
+
+---
+
+## 1. Core Principles (NON-NEGOTIABLE)
+
+1. Tests protect **behavior**, not implementation.
+2. Unit tests are the primary confidence layer for business rules.
+3. Integration tests validate **wiring + persistence + API contract execution**.
+4. Do not invent expected outcomes — derive from source of truth or ask.
+5. A wrong test is worse than no test. If unsure → ask.
+
+Violating these principles produces misleading tests.
+
+---
+
+## 2. Source of Truth for Tests (CRITICAL)
+
+All expectations (inputs/outputs), fixtures, and assertions MUST be derived from one of:
+
+1. **GraphQL schema** (SDL) and resolver contracts
+2. **Domain requirements** / product specs / tickets
+3. Existing **trusted** tests and golden fixtures
+4. Database schema/migrations (Flyway) where applicable
+
+If none apply → **ASK**.
+
+Cursor MUST NOT invent:
+- Business logic rules
+- Authorization decisions
+- Error formats and mapping rules
+- Data shapes or “likely” fields
+
+---
+
+## 3. What to Test (Scope & Priorities)
+
+### Questions you MUST answer before writing a test
+
+- What behavior is this test protecting?
+- Is the behavior **domain logic**, **API wiring**, or **persistence correctness**?
+- Is this new behavior or a bug fix (regression test required)?
+- Is this testing something intentionally out of scope (e.g., third-party SDK internals)?
+
+### Required clarity
+
+- List of critical domain behaviors that must always be protected
+- Policy: new behavior → new test
+- Policy: bug fix → regression test
+- Ownership: which module/domain owns the behavior
+
+If any of the above is unclear → **ASK**.
+
+---
+
+## 4. Testing Levels (How to Choose)
+
+### 4.1 Unit Tests (MANDATORY)
+
+**Purpose:** validate domain logic and decisions in isolation.
+
+**Allowed**
+- Domain rules and calculations
+- Validation rules
+- Authorization decisions (as pure functions/policies)
+- Mapping / transformation logic
+- Edge cases
+
+**Forbidden**
+- Spring context loading (`@SpringBootTest`, `@WebMvcTest`, etc.)
+- Databases (any kind)
+- Testcontainers
+- LocalStack
+- File system access
+- Network calls
+
+**Mocking Rules (Mockito Classic only)**
+- Mock **external edges** only (ports, clients, repositories if needed)
+- Prefer fakes/stubs over deep mocking when reasonable
+- NEVER mock your own domain entities/value objects
+- NEVER mock collections/DTOs just to “make it easy”
+
+**Quality Rules**
+- One behavior per test (focus)
+- Tests must fail if logic is removed or inverted
+- Names describe behavior (not method names)
+
+---
+
+### 4.2 Integration Tests (LOCAL, REQUIRED)
+
+**Purpose:** validate that wiring + persistence + GraphQL execution behave correctly.
+
+**Must validate**
+- Repository ↔ PostgreSQL correctness (joins, filters, sorting)
+- Flyway migrations apply cleanly to a fresh DB
+- GraphQL resolver → service → repository wiring
+- Error mapping (domain errors → GraphQL error responses) when specified
+
+**How**
+- Use **Testcontainers PostgreSQL**
+- Load Spring context explicitly (integration profile)
+- Execute real GraphQL queries/mutations (not “mocked resolvers”)
+
+**Must NOT validate here**
+- Deep business rule correctness (belongs in unit tests)
+- Cross-service, multi-system end-to-end flows (keep integration tests focused)
+- AWS semantics unless explicitly required
+
+---
+
+### 4.3 End-to-End / System Tests (OPTIONAL, LOCAL ONLY)
+
+**Purpose:** smoke confidence for critical journeys only.
+
+Rules:
+- Minimal count
+- Deterministic
+- No large suites
+- Must not become the primary correctness mechanism
+
+If someone proposes adding many E2E tests → **STOP AND ASK**.
+
+---
+
+## 5. Local Environment & Running Tests (MANDATORY CLARITY)
+
+### Commands (Maven)
+
+- Run unit tests:
+  - `mvn test`
+- Run integration tests (recommended pattern):
+  - `mvn -P it verify`
+
+> If your repo uses different profiles/naming, document the exact commands here and keep them consistent.
+
+### Test separation (recommended)
+- Unit tests: `*Test.java`
+- Integration tests: `*IT.java` (or `*IntegrationTest.java`)
+
+### Determinism requirements
+Local tests must:
+- Start and stop their own dependencies (e.g., Testcontainers)
+- Not depend on shared remote environments
+- Not require manual steps (unless explicitly documented)
+
+If a test requires undocumented setup, the test is incorrect.
+
+### 5.1 Local Environment Quirks (macOS + Colima) — Testcontainers Ryuk
+
+If your local Docker provider is **Colima** (the common macOS-native alternative to Docker Desktop), Testcontainers' Ryuk reaper fails to start because Colima's virtiofs cannot bind-mount its own `docker.sock` into the Ryuk container:
+
+```
+Caused by: org.testcontainers.containers.ContainerLaunchException:
+  Container startup failed for image testcontainers/ryuk:0.12.0
+...
+Caused by: InternalServerErrorException: Status 500:
+  {"message":"error while creating mount source path
+   '/Users/<user>/.colima/default/docker.sock':
+   mkdir /Users/<user>/.colima/default/docker.sock:
+   operation not supported"}
+```
+
+**Symptom on the surface:** `NoClassDefFoundError: Could not initialize class <YourIT>` on **every** test in the IT class. Reads like a compile error or codepath regression — it is neither. It is a static-initializer failure caused by Ryuk container startup.
+
+**Workaround:** Disable Ryuk when running Testcontainers ITs:
+
+```bash
+TESTCONTAINERS_RYUK_DISABLED=true mvn -P it verify -Dit.test='SomeIT'
+```
+
+Or persistently (recommended for Colima users) in `~/.testcontainers.properties`:
+
+```properties
+testcontainers.reuse.enable=true
+ryuk.disabled=true
+```
+
+**Trade-off:** Without Ryuk, abandoned containers from crashed test runs don't get auto-reaped. Periodically clean them up:
+
+```bash
+docker ps -a --filter "label=org.testcontainers" --format '{{.ID}}' | xargs -r docker rm -f
+```
+
+**Diagnostic rule (general):** When Testcontainers fails with `NoClassDefFoundError` for **all** tests in an IT class, the root cause is almost never your code. Read the failsafe-reports stack trace (`target/failsafe-reports/<test>-output.txt`) — the actual cause is a static-initializer failure, typically Docker daemon down, socket mount-fail, or Ryuk startup. Do NOT investigate individual test code paths until you've confirmed the daemon side.
+
+This applies to any Docker-in-virtualization stack (Colima, Podman Desktop, OrbStack) — Docker Desktop itself does not hit this because it owns the VM and mounts the socket natively.
+
+---
+
+## 6. Flyway Testing (LOCAL)
+
+### What to test
+
+Integration tests MUST verify:
+- Migrations apply cleanly on a fresh Postgres container
+- No checksum drift
+- No invalid ordering assumptions (if team uses out-of-order, explicitly document)
+
+### What NOT to test here
+- Performance characteristics
+- “Production data” correctness
+
+---
+
+## 7. AWS & LocalStack Decision Rule (CRITICAL)
+
+### Default rule
+- AWS clients are mocked in unit tests.
+- Integration tests DO NOT use LocalStack by default.
+
+### LocalStack is allowed ONLY if
+- Correctness depends on AWS behavior itself.
+
+**Valid examples**
+- S3 metadata / ACL behavior that your code relies on
+- SQS visibility timeout / redrive semantics you depend on
+- DynamoDB conditional writes you depend on
+
+**Invalid examples**
+- “Test API returns correct data”
+- “Test business logic”
+- “Test service orchestration”
+
+If Cursor believes LocalStack is required → **STOP AND ASK**.
+
+---
+
+## 8. Code Coverage Policy (LOCAL)
+
+- Target range: **70–85%**
+- Coverage is a reporting signal, not a goal.
+
+**Explicitly forbidden**
+- Writing tests just to raise coverage
+- Testing trivial getters/setters/constructors
+- “Asserting everything” with meaningless checks
+
+If coverage is low, the fix is **better tests for behaviors**, not more tests.
+
+---
+
+## 9. Test Quality Enforcement
+
+### 9.1 Mutation Testing (Preferred)
+- Tool: PIT (or equivalent)
+- Target mutation score: **>80%** (strong signal of effective tests)
+
+Mutation testing measures **test effectiveness**, not quantity.
+
+### 9.2 Architectural/Boundary Tests (Recommended)
+- Enforce domain boundaries and forbidden dependencies.
+- Fail fast if module isolation is violated.
+
+(If you use ArchUnit, document where rules live and what they enforce.)
+
+### 9.3 Review Heuristics (for humans and Cursor)
+A good test:
+- Fails when logic breaks
+- Reads like a requirement
+- Has minimal mocking
+- Has deterministic setup/teardown
+- Avoids asserting incidental details
+
+---
+
+## 10. Test Structure, Location & Naming (CRITICAL FOR CONSISTENCY)
+
+### Where test files live (recommended)
+- Co-locate tests with the code they validate:
+  - `src/test/java/.../SomeServiceTest.java`
+  - `src/test/java/.../SomeRepositoryIT.java`
+- Prefer domain/module grouping over “misc test folders”.
+
+Avoid:
+- Huge global `tests/` buckets that mix domains.
+- Random utilities duplicated across modules.
+
+### Naming conventions (MANDATORY)
+- `Unit tests`: `ClassNameTest`
+- `Integration tests`: `ClassNameIT`
+- Use behavior-based naming in method names:
+  - `shouldReturnOrdersWhenFilterApplied()`
+  - `shouldRejectRequestWhenUserLacksPermission()`
+
+Avoid:
+- Vague names like `test1`, `works`, `happyPath`
+- Names reflecting implementation (“callsMapperTwice”)
+
+### Grouping pattern
+- One test class per unit under test.
+- Group scenarios clearly using nested tests or descriptive methods.
+
+---
+
+## 11. Cursor Operating Rules (CRITICAL)
+
+Cursor MUST:
+- Never modify production code to satisfy tests
+- Never weaken assertions to make tests pass
+- Always derive expectations from declared sources of truth
+- Ask when behavior, API shape, or intent is unclear
+
+Cursor MUST NOT:
+- Invent business logic
+- Guess authorization behavior
+- Assume default error mapping
+- “Fix” flakiness by adding sleeps/timeouts
+
+Ambiguity → **STOP AND ASK**.
+
+---
+
+## 12. Worked Examples (REFERENCE ONLY — DO NOT COPY BLINDLY)
+
+### 12.1 Example: Unit Test (Domain Rule)
+- Focused behavior
+- No Spring
+- No DB
+
+```java
+class BonusPolicyTest {
+
+  @Test
+  void shouldDenyBonusWhenRatingBelowThreshold() {
+    // given
+    var policy = new BonusPolicy(/* config */);
+
+    // when
+    var result = policy.isBonusEligible(/* rating */);
+
+    // then
+    assertThat(result).isFalse();
+  }
+}
+```
+
+### 12.2 Example: Integration Test (GraphQL + Postgres)
+- Uses Testcontainers Postgres
+- Executes a real GraphQL query
+- Asserts visible contract outputs
+
+```java
+@SpringBootTest
+class EmployeeQueryIT {
+
+  @Test
+  void shouldReturnEmployeesForDepartment() {
+    // given: DB seeded via migration + test data
+
+    // when: execute GraphQL query via test client
+
+    // then: assert returned fields match contract
+  }
+}
+```
+
+### 12.3 Example: What NOT to Do
+- Over-mocking
+- Asserting implementation details
+- Passing tests without protecting behavior
+
+```java
+@Test
+void works() {
+  when(repo.findAll()).thenReturn(List.of());
+  assertThat(true).isTrue();
+}
+```
+
+---
+
+## 13. Definition of a Good Backend Test
+
+A good backend test:
+- Breaks when logic breaks
+- Reads like a requirement
+- Is deterministic
+- Has no hidden dependencies
+- Uses the right level (unit vs integration) for the job
+
+If these conditions are not met, the test is incorrect.

@@ -1,0 +1,100 @@
+---
+description: Initial Java/Spring Boot conventions and patterns (deferred until 2-3 domains built)
+alwaysApply: false
+status: DEFERRED
+---
+
+# Java/Spring Boot Conventions — Initial Patterns (DEFERRED)
+
+**Audience:** Cursor (entry-level engineer), human developers
+**Role Perspective:** Senior Staff Java Engineer
+**Scope:** Java/Spring Boot coding conventions, patterns, and best practices
+**Status:** DEFERRED until 2-3 domains are built to establish natural patterns
+
+---
+
+## 0. Current Status
+
+**⚠️ This governance document is DEFERRED.**
+
+**Why:** Domain Modeling Conventions should emerge naturally from building 2-3 domains first. Premature abstraction leads to over-engineering.
+
+**When to activate:**
+- After building User, Event, and Invitation domains
+- When patterns have been established through actual code
+- When team agrees on conventions that work in practice
+
+**Until then:** Follow the initial conventions documented in `CLAUDE.md` Section "Initial Java/Spring Boot Conventions".
+
+---
+
+## 1. Placeholder: Package Structure
+
+**To be determined after building 2-3 domains.**
+
+Topics to cover:
+- Package naming conventions
+- JPMS module structure
+- Hexagonal architecture layers
+- Package-by-feature vs package-by-layer
+
+---
+
+## 2. Placeholder: DDD Tactical Patterns
+
+**To be determined after building 2-3 domains.**
+
+Topics to cover:
+- Entity patterns
+- Value object patterns
+- Aggregate patterns
+- Repository patterns
+- Domain service patterns
+- Factory patterns
+
+---
+
+## 3. Placeholder: Spring Boot Patterns
+
+**To be determined after building 2-3 domains.**
+
+Topics to cover:
+- `@Service` vs `@Component` usage
+- `@Transactional` boundaries
+- Exception handling patterns
+- Configuration patterns
+- Profile-specific beans
+
+---
+
+## 4. Placeholder: JPA Patterns
+
+**To be determined after building 2-3 domains.**
+
+Topics to cover:
+- Entity mapping patterns
+- Relationship mapping (OneToMany, ManyToOne)
+- Lazy vs Eager loading
+- Query patterns (JPQL, Criteria API)
+- Performance optimization
+
+---
+
+## 5. Placeholder: Code Style
+
+**To be determined after building 2-3 domains.**
+
+Topics to cover:
+- Naming conventions (fields, methods, classes)
+- Code formatting (via Checkstyle/Spotless)
+- JavaDoc requirements
+- Logging patterns
+- Null handling
+
+---
+
+## Final Note
+
+This document will be populated **after** the team has built 2-3 domains and natural patterns have emerged. Avoid premature abstraction.
+
+**Refer to:** `CLAUDE.md` Section "Initial Java/Spring Boot Conventions" for current patterns to follow.

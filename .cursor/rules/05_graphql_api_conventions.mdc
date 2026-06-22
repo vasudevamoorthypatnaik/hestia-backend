@@ -1,0 +1,1193 @@
+---
+description: GraphQL API design conventions and patterns
+alwaysApply: true
+---
+
+# GraphQL API Conventions — Authoritative
+
+**Audience:** Cursor (entry-level engineer), human developers
+**Role Perspective:** Senior Staff API Engineer
+**Scope:** GraphQL schema design, error handling, validation patterns
+**Primary Goal:** Consistent, predictable, maintainable GraphQL API
+
+---
+
+## 0. Technology Stack (NON-NEGOTIABLE)
+
+- **Framework:** Spring GraphQL (Spring Boot 3.x)
+- **Schema Language:** GraphQL SDL (.graphqls files)
+- **Validation:** Spring Validation (`@Valid`, `@NotNull`, etc.) + custom validators
+- **Error Handling:** GraphQL errors with extensions (type, code, details)
+- **Testing:** GraphQL test client (integration tests)
+
+If any tool or pattern is unclear → **STOP AND ASK**.
+
+---
+
+## 1. API Backward Compatibility (NON-NEGOTIABLE)
+
+Once a mobile app binary is released to users, old versions persist on phones for weeks or months. The backend MUST support both old and new clients simultaneously. This is not optional — breaking a released client is a production incident.
+
+### 1.1 The Rule
+
+Every GraphQL schema change MUST be backward-compatible with the currently-released mobile app binary. Old clients will call the backend for weeks/months after a new version ships.
+
+### 1.2 Change Classification
+
+| Change Type | Safe? | Action Required |
+|-------------|-------|-----------------|
+| Add new field to type | Safe | Just add it |
+| Add new query/mutation | Safe | Just add it |
+| Add new enum value | Safe | Just add it |
+| Add new optional input field | Safe | Just add it |
+| Rename a field | **BREAKING** | Add new field, deprecate old, remove after 2 releases |
+| Remove a field | **BREAKING** | Deprecate first, remove after 2 release cycles or 60 days (whichever longer) |
+| Change field type | **BREAKING** | Add new field with new type, deprecate old |
+| Change nullability (nullable → non-null) | **BREAKING** | Old clients may send null — add new field instead |
+| Make validation stricter | **POTENTIALLY BREAKING** | Old clients may send values that now fail — accept both |
+| Remove enum value | **BREAKING** | Old clients may send the removed value |
+
+### 1.3 Migration Protocol
+
+When a breaking change is necessary, follow this exact sequence:
+
+1. **Add new** — Deploy backend with BOTH old and new field/mutation
+2. **Deprecate old** — Mark with `@deprecated(reason: "Use newField instead. Will be removed after v1.X.")`
+3. **Submit new app** — Build and submit the app version that uses the new field
+4. **Wait for adoption** — Monitor for 2 release cycles or 60 days (whichever longer)
+5. **Remove old** — Cleanup PR removes deprecated field after adoption threshold
+
+**Example:**
+
+```graphql
+type User {
+  name: String! @deprecated(reason: "Use firstName and lastName instead. Will be removed after v1.3.")
+  firstName: String!
+  lastName: String!
+}
+```
+
+### 1.4 Deploy Sequence (Mobile-First)
+
+```
+Backend deploys first (supports BOTH old and new client)
+  → Submit new app binary to App Store / Play Store
+  → Apple/Google approves (24-48h / 1-3 days)
+  → Gradual rollout (10% → 50% → 100%)
+  → Wait for adoption (2-4 weeks, check analytics)
+  → Backend cleanup PR removes old code path
+```
+
+**Key discipline:** Backend changes are always a two-phase operation — add new support first, remove old support last.
+
+### 1.5 Forced Update Escape Hatch (FUTURE WORK — NOT YET IMPLEMENTED)
+
+When backward compatibility is truly impossible, the app can implement a minimum version check:
+
+- Frontend sends `X-App-Version` header on every request
+- Backend interceptor checks against minimum required version
+- Returns `426 UPGRADE_REQUIRED` if version is too old
+- Frontend shows "Please update to continue" modal with App Store link
+
+**NOTE:** This mechanism does not exist in the codebase yet. It is documented here as the escape hatch pattern. A separate ticket is required to implement it. Use sparingly — users dislike forced updates.
+
+### 1.6 Deprecation Protocol
+
+- Use `@deprecated(reason: "...")` annotation in `.graphqls` schema files
+- Minimum deprecation period: 2 release cycles or 60 days, whichever is longer
+- Before removing: verify via analytics/logs that no active clients use the deprecated field
+- After removing: run `npm run codegen` in the frontend repo to regenerate types and clean up usage
+- Document the deprecation in the domain README with an Architecture Decision Record
+
+### 1.7 Pre-Schema-Change Checklist
+
+Before modifying ANY `.graphqls` file, answer these questions:
+
+- [ ] Is this change additive (new field/query/mutation)? → **Safe**, proceed
+- [ ] Does this rename, remove, or change the type of an existing field? → **BREAKING** — follow migration protocol (Section 1.3)
+- [ ] Does this make an existing nullable field non-null? → **BREAKING** — old clients may send null
+- [ ] Does this make validation stricter? → Check if old clients could send values that now fail
+- [ ] Have I checked the currently-released mobile binary to confirm it doesn't use the field I'm changing?
+
+If any answer indicates a breaking change, you MUST follow the migration protocol. No exceptions.
+
+---
+
+## 2. Core Principles (NON-NEGOTIABLE)
+
+1. **Schema-First Design:** GraphQL schema is the contract. Write schema first, then implement resolvers.
+2. **Nullability by Default:** Fields are nullable unless explicitly required with `!`.
+3. **Explicit Error Types:** Use typed errors with error codes, not generic strings.
+4. **Pagination for Collections:** All lists that can grow unbounded MUST use cursor-based pagination.
+5. **Input Validation:** Validate all inputs at the resolver layer before calling service layer.
+6. **Idempotency:** Mutations SHOULD be idempotent where possible (use idempotency keys).
+
+Violating these principles produces inconsistent, error-prone APIs.
+
+---
+
+## 3. Schema Design Patterns
+
+### 3.1 Naming Conventions (MANDATORY)
+
+#### Types
+- **Objects:** PascalCase, singular nouns: `User`, `Invitation`, `Event`
+- **Enums:** PascalCase, singular nouns: `InvitationStatus`, `EventType`
+- **Inputs:** PascalCase, suffix with `Input`: `CreateEventInput`, `UpdateUserInput`
+- **Interfaces:** PascalCase, adjective or noun: `Node`, `Timestamped`, `Auditable`
+
+#### Fields
+- **Queries:** camelCase, descriptive: `user(id: ID!)`, `invitations(filter: InvitationFilter!)`
+- **Mutations:** camelCase, verb + noun: `createEvent`, `updateInvitation`, `deleteUser`
+- **Field names:** camelCase: `firstName`, `createdAt`, `invitationStatus`
+
+#### Arguments
+- **Required args:** Use `!` suffix: `user(id: ID!)`
+- **Optional filters:** Use input objects: `invitations(filter: InvitationFilter, pagination: PaginationInput)`
+
+**Examples:**
+
+```graphql
+# ✅ GOOD
+type User {
+  id: ID!
+  firstName: String!
+  lastName: String!
+  email: String!
+  createdAt: DateTime!
+}
+
+type Query {
+  user(id: ID!): User
+  users(filter: UserFilter, pagination: PaginationInput): UserConnection!
+}
+
+type Mutation {
+  createUser(input: CreateUserInput!): CreateUserPayload!
+  updateUser(id: ID!, input: UpdateUserInput!): UpdateUserPayload!
+}
+
+# ❌ BAD
+type user {  # Wrong: lowercase type name
+  ID: ID!  # Wrong: uppercase field name
+  first_name: String!  # Wrong: snake_case
+}
+
+type Query {
+  getUser(id: ID!): User  # Wrong: redundant "get" prefix
+  UserList: [User]  # Wrong: PascalCase query name
+}
+```
+
+---
+
+### 3.2 Nullability Rules (CRITICAL)
+
+**Default:** Fields are **nullable** unless you're certain they will ALWAYS exist.
+
+**When to use non-null (`!`):**
+- Primary keys: `id: ID!`
+- Required business fields: `email: String!` (if email is mandatory)
+- Guaranteed system fields: `createdAt: DateTime!`
+- Non-null collections: `users: [User!]!` (list itself non-null, items non-null)
+
+**When to use nullable:**
+- Optional fields: `phoneNumber: String` (user may not provide)
+- Relationships that may not exist: `organization: Organization` (user may not belong to one)
+- Fields that may fail to load: `profileImage: String` (S3 URL may be unavailable)
+
+**Critical Rule:**
+> Making a field non-null is a **breaking change** if it was previously nullable. Always start nullable, make non-null later if needed.
+
+**Examples:**
+
+```graphql
+# ✅ GOOD
+type User {
+  id: ID!                     # Always exists (primary key)
+  email: String!              # Required by business rules
+  firstName: String!          # Required by business rules
+  lastName: String!           # Required by business rules
+  phoneNumber: String         # Optional (user may not provide)
+  profileImageUrl: String     # Optional (may not be uploaded)
+  organization: Organization  # Optional (user may not belong to one)
+  createdAt: DateTime!        # System field, always exists
+}
+
+# ❌ BAD
+type User {
+  id: ID                      # Wrong: primary key should be non-null
+  email: String               # Wrong: email is required by business rules
+  phoneNumber: String!        # Wrong: phone is optional, forcing non-null will break clients
+  organization: Organization! # Wrong: not all users belong to an organization
+}
+```
+
+---
+
+### 3.3 Pagination (MANDATORY for unbounded lists)
+
+**Pattern:** Cursor-based pagination (Relay-style Connections)
+
+**When to paginate:**
+- Any list that can grow unbounded: `invitations`, `events`, `users`
+- Lists with >20 items expected
+
+**When NOT to paginate:**
+- Enums (fixed size)
+- Small, bounded lists: `roles` (if there are only 3-5 roles)
+
+**Schema Pattern:**
+
+```graphql
+# Connection type
+type UserConnection {
+  edges: [UserEdge!]!
+  pageInfo: PageInfo!
+  totalCount: Int!  # Optional: total count (expensive query, use sparingly)
+}
+
+type UserEdge {
+  node: User!
+  cursor: String!
+}
+
+type PageInfo {
+  hasNextPage: Boolean!
+  hasPreviousPage: Boolean!
+  startCursor: String
+  endCursor: String
+}
+
+# Input for pagination
+input PaginationInput {
+  first: Int   # Forward pagination: first N items after cursor
+  after: String  # Cursor to start after
+  last: Int    # Backward pagination: last N items before cursor
+  before: String  # Cursor to start before
+}
+
+# Query
+type Query {
+  users(
+    filter: UserFilter
+    pagination: PaginationInput
+  ): UserConnection!
+}
+```
+
+**Cursor Encoding:**
+- Cursors MUST be opaque strings (Base64-encoded, not exposed implementation details)
+- Example cursor: `base64("User:123:2024-01-15T10:30:00Z")` (combines ID + timestamp for stable ordering)
+
+**Default Pagination:**
+- Default `first`: 20 items
+- Max `first`: 100 items (reject requests with `first > 100`)
+
+---
+
+### 3.4 Input Objects (MANDATORY for mutations)
+
+**Pattern:** Use Input objects for all mutation arguments, NOT individual scalar arguments.
+
+**Why:** Easier to evolve, clearer intent, better validation grouping.
+
+**Schema Pattern:**
+
+```graphql
+# ✅ GOOD: Input object
+input CreateEventInput {
+  title: String!
+  description: String
+  startTime: DateTime!
+  endTime: DateTime!
+  location: String
+  maxAttendees: Int
+}
+
+type Mutation {
+  createEvent(input: CreateEventInput!): CreateEventPayload!
+}
+
+# ❌ BAD: Individual arguments
+type Mutation {
+  createEvent(
+    title: String!
+    description: String
+    startTime: DateTime!
+    endTime: DateTime!
+    location: String
+    maxAttendees: Int
+  ): Event!  # Also wrong: should return payload type, not entity directly
+}
+```
+
+**Naming:**
+- Input types: `{Action}{Entity}Input` → `CreateEventInput`, `UpdateUserInput`
+- Payload types: `{Action}{Entity}Payload` → `CreateEventPayload`, `UpdateUserPayload`
+
+---
+
+### 3.5 Mutation Response Patterns (MANDATORY)
+
+**Pattern:** Always return a **Payload type**, never return the entity directly.
+
+**Why:**
+- Allows returning errors alongside success data
+- Extensible (can add metadata later)
+- Supports partial success scenarios
+
+**Schema Pattern:**
+
+```graphql
+# ✅ GOOD: Payload type
+type CreateEventPayload {
+  event: Event            # The created entity (nullable if creation failed)
+  errors: [UserError!]    # Validation/business errors
+  success: Boolean!       # Quick success check
+}
+
+type UserError {
+  message: String!        # Human-readable error message
+  field: String           # Field that caused error (for input validation)
+  code: ErrorCode!        # Machine-readable error code
+}
+
+enum ErrorCode {
+  VALIDATION_ERROR
+  UNAUTHORIZED
+  NOT_FOUND
+  DUPLICATE_ENTRY
+  BUSINESS_RULE_VIOLATION
+}
+
+type Mutation {
+  createEvent(input: CreateEventInput!): CreateEventPayload!
+}
+
+# ❌ BAD: Return entity directly
+type Mutation {
+  createEvent(input: CreateEventInput!): Event!  # Cannot return validation errors
+}
+```
+
+**Success Response Example:**
+```json
+{
+  "data": {
+    "createEvent": {
+      "success": true,
+      "event": { "id": "123", "title": "Birthday Party" },
+      "errors": []
+    }
+  }
+}
+```
+
+**Error Response Example:**
+```json
+{
+  "data": {
+    "createEvent": {
+      "success": false,
+      "event": null,
+      "errors": [
+        {
+          "message": "Start time must be in the future",
+          "field": "startTime",
+          "code": "VALIDATION_ERROR"
+        }
+      ]
+    }
+  }
+}
+```
+
+---
+
+### 3.6 Filtering Patterns (RECOMMENDED)
+
+**Pattern:** Use Input objects for filters, group by entity.
+
+```graphql
+input UserFilter {
+  search: String             # Full-text search across name/email
+  status: UserStatus         # Enum filter
+  createdAfter: DateTime     # Date range filter
+  organizationId: ID         # Relationship filter
+}
+
+type Query {
+  users(filter: UserFilter, pagination: PaginationInput): UserConnection!
+}
+```
+
+**Filter Naming:**
+- Boolean operations: `isActive: Boolean`, `hasOrganization: Boolean`
+- Comparison: `createdAfter: DateTime`, `createdBefore: DateTime`
+- Exact match: `status: UserStatus`, `organizationId: ID`
+- Search: `search: String` (full-text across multiple fields)
+
+---
+
+### 3.7 Interfaces vs Unions (When to Use)
+
+**Use Interface when:**
+- Types share common fields
+- You need to query shared fields without type fragments
+
+**Example:**
+```graphql
+interface Node {
+  id: ID!
+}
+
+interface Timestamped {
+  createdAt: DateTime!
+  updatedAt: DateTime!
+}
+
+type User implements Node & Timestamped {
+  id: ID!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+  email: String!
+}
+
+type Event implements Node & Timestamped {
+  id: ID!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+  title: String!
+}
+
+# Query
+type Query {
+  node(id: ID!): Node  # Polymorphic lookup
+}
+```
+
+**Use Union when:**
+- Types do NOT share common fields
+- Representing multiple possible return types
+
+**Example:**
+```graphql
+union SearchResult = User | Event | Organization
+
+type Query {
+  search(query: String!): [SearchResult!]!
+}
+
+# Client query
+query {
+  search(query: "birthday") {
+    ... on User { id email }
+    ... on Event { id title }
+    ... on Organization { id name }
+  }
+}
+```
+
+---
+
+## 4. Error Handling (CRITICAL)
+
+### 4.1 Error Types
+
+**Two categories of errors:**
+
+1. **GraphQL Errors** (system/transport errors):
+   - Authentication failure
+   - Authorization failure
+   - Internal server errors
+   - Returned in top-level `errors` field
+
+2. **User Errors** (business/validation errors):
+   - Validation failures
+   - Business rule violations
+   - Returned in mutation payload `errors` field
+
+**Pattern:**
+
+```graphql
+# User errors (business logic)
+type UserError {
+  message: String!
+  field: String           # Optional: field that caused error
+  code: ErrorCode!
+}
+
+enum ErrorCode {
+  # Validation
+  VALIDATION_ERROR
+  REQUIRED_FIELD_MISSING
+  INVALID_FORMAT
+
+  # Authorization
+  UNAUTHORIZED
+  FORBIDDEN
+
+  # Business rules
+  DUPLICATE_ENTRY
+  BUSINESS_RULE_VIOLATION
+  RESOURCE_NOT_FOUND
+
+  # System
+  INTERNAL_ERROR
+  EXTERNAL_SERVICE_ERROR
+}
+```
+
+**Example Response (User Error):**
+```json
+{
+  "data": {
+    "createEvent": {
+      "success": false,
+      "event": null,
+      "errors": [
+        {
+          "message": "Event title must be at least 3 characters",
+          "field": "title",
+          "code": "VALIDATION_ERROR"
+        }
+      ]
+    }
+  }
+}
+```
+
+**Example Response (GraphQL Error):**
+```json
+{
+  "data": null,
+  "errors": [
+    {
+      "message": "Authentication required",
+      "extensions": {
+        "code": "UNAUTHORIZED",
+        "classification": "AUTHENTICATION"
+      }
+    }
+  ]
+}
+```
+
+#### `extensions.code` vs `extensions.classification` — distinct fields, distinct purposes
+
+These two fields look similar but have **different producers and different contracts**:
+
+| Field | Producer | Purpose |
+|---|---|---|
+| `extensions.classification` | Spring GraphQL's `DefaultDataFetcherExceptionResolver` (automatic) | System-generated categorization: `INTERNAL_ERROR`, `BAD_REQUEST`, `NOT_FOUND`, `UNAUTHORIZED` |
+| `extensions.code` | Explicit `GraphqlErrorBuilder.extensions(Map.of("code", "RATE_LIMITED"))` calls, or upstream WAF/CDN (AWS WAF, CloudFront) | Contract-documented, machine-readable code for the FE to switch on |
+
+**Rule:** when publishing an explicit user-actionable code, populate `extensions.code` — do NOT overload `classification`. Spring's default resolver owns `classification`; manually setting it conflicts with the automatic categorization.
+
+**Concrete pattern (correct):**
+```java
+return GraphqlErrorBuilder.newError(env)
+    .errorType(ErrorType.FORBIDDEN)
+    .message(messageSource.getMessage("auth.error.rate_limited", null, locale))
+    .extensions(Map.of(
+        "code", "RATE_LIMITED",
+        "userMessage", localizedMessage))
+    .build();
+// Spring sets classification: "FORBIDDEN" automatically.
+// Our explicit code: "RATE_LIMITED" is what FE switches on.
+```
+
+**Frontend contract:** FE parsers check `extensions.code` FIRST (which catches both our explicit mappings AND upstream WAF/CDN errors that lack `classification`), then fall through to `classification`. See `frontend: 06_graphql-integration.mdc § 5.2` and `frontend: 13_error-handling-patterns.mdc § 3.3` for the consumer side.
+
+**Anti-pattern (don't do this):**
+```java
+.extensions(Map.of("classification", "RATE_LIMITED"))  // ❌ overloads Spring's field
+.extensions(Map.of("code", "INTERNAL_ERROR"))           // ❌ duplicates classification
+```
+
+**Real incident (June 2026, login-i18n-en-es):** the FE parser only checked `extensions.code === 'RATE_LIMITED'` to localize WAF rate-limit errors. AWS WAF sets `code` but not `classification`; Spring sets `classification` but not `code` for system errors. Keeping the two fields distinct lets the FE parser dispatch correctly across both producers.
+
+### 4.2 Error Handling Rules
+
+**Cursor MUST:**
+- Return validation errors in payload `errors` field (not throw exceptions)
+- Use `ErrorCode` enum for machine-readable error codes
+- Include `field` when error is tied to specific input field
+- Use descriptive `message` for human-readable explanation
+
+**Cursor MUST NOT:**
+- Expose stack traces in error messages
+- Return raw database errors to clients
+- Use generic error messages like "Error occurred"
+
+---
+
+## 5. Input Validation (MANDATORY)
+
+### 5.1 Validation Layers
+
+**Two layers of validation:**
+
+1. **Schema-level validation** (GraphQL type system):
+   - Non-null checks (`!`)
+   - Type checks (String, Int, DateTime)
+   - Enum validation
+
+2. **Business-level validation** (resolver/service layer):
+   - Format validation (email, phone, URL)
+   - Range validation (min/max length, min/max value)
+   - Business rules (start time < end time, unique email, etc.)
+
+**Pattern:**
+
+```java
+// Resolver layer (Spring GraphQL)
+@MutationMapping
+public CreateEventPayload createEvent(@Valid @Argument CreateEventInput input) {
+    // Spring validation runs automatically due to @Valid
+    // If validation fails, GraphQL error is returned
+
+    // Business validation in service layer
+    return eventService.createEvent(input);
+}
+
+// Input DTO (Java)
+public record CreateEventInput(
+    @NotBlank(message = "Title is required")
+    @Size(min = 3, max = 100, message = "Title must be 3-100 characters")
+    String title,
+
+    @NotNull(message = "Start time is required")
+    @Future(message = "Start time must be in the future")
+    LocalDateTime startTime,
+
+    @NotNull(message = "End time is required")
+    LocalDateTime endTime,
+
+    @Min(value = 1, message = "Max attendees must be at least 1")
+    @Max(value = 10000, message = "Max attendees cannot exceed 10,000")
+    Integer maxAttendees
+) {
+    // Custom validation (cross-field)
+    public CreateEventInput {
+        if (endTime.isBefore(startTime)) {
+            throw new ValidationException("End time must be after start time");
+        }
+    }
+}
+```
+
+### 5.2 Validation Error Response
+
+**When validation fails, return errors in payload:**
+
+```java
+// Service layer
+public CreateEventPayload createEvent(CreateEventInput input) {
+    List<UserError> errors = new ArrayList<>();
+
+    // Business rule: check for duplicate title
+    if (eventRepository.existsByTitle(input.title())) {
+        errors.add(new UserError(
+            "Event with this title already exists",
+            "title",
+            ErrorCode.DUPLICATE_ENTRY
+        ));
+    }
+
+    if (!errors.isEmpty()) {
+        return new CreateEventPayload(null, errors, false);
+    }
+
+    // Create event
+    Event event = eventRepository.save(new Event(input));
+    return new CreateEventPayload(event, List.of(), true);
+}
+```
+
+---
+
+## 6. Query vs Mutation Guidelines
+
+### 6.1 When to Use Query
+
+**Use Query for:**
+- Reading data (no side effects)
+- Idempotent operations (same input = same output)
+- Safe operations (can be retried without consequences)
+
+**Examples:**
+- `user(id: ID!): User`
+- `events(filter: EventFilter): EventConnection!`
+- `searchInvitations(query: String!): [Invitation!]!`
+
+### 6.2 When to Use Mutation
+
+**Use Mutation for:**
+- Creating, updating, deleting data
+- Non-idempotent operations (side effects)
+- Unsafe operations (retrying changes system state)
+
+**Examples:**
+- `createEvent(input: CreateEventInput!): CreateEventPayload!`
+- `updateUser(id: ID!, input: UpdateUserInput!): UpdateUserPayload!`
+- `deleteInvitation(id: ID!): DeleteInvitationPayload!`
+
+### 6.3 Idempotency for Mutations (RECOMMENDED)
+
+**Pattern:** Use idempotency keys for mutations that should not be retried.
+
+```graphql
+input CreateEventInput {
+  idempotencyKey: String!  # Client-generated unique key
+  title: String!
+  # ... other fields
+}
+
+type Mutation {
+  createEvent(input: CreateEventInput!): CreateEventPayload!
+}
+```
+
+**Implementation:**
+- Store idempotency key + result in database/cache
+- If same key is sent again, return cached result (don't re-execute)
+- Keys expire after 24 hours
+
+---
+
+## 7. Schema Organization (RECOMMENDED)
+
+### 7.1 File Structure
+
+```
+src/main/resources/graphql/
+├── schema.graphqls           # Root schema (Query, Mutation, Subscription)
+├── types/
+│   ├── user.graphqls        # User type + related types
+│   ├── event.graphqls       # Event type + related types
+│   ├── invitation.graphqls  # Invitation type + related types
+├── inputs/
+│   ├── user-inputs.graphqls       # User input types
+│   ├── event-inputs.graphqls      # Event input types
+├── common/
+│   ├── pagination.graphqls  # Pagination types (Connection, PageInfo)
+│   ├── errors.graphqls      # Error types (UserError, ErrorCode)
+│   ├── scalars.graphqls     # Custom scalars (DateTime, URL, Email)
+```
+
+### 7.2 Schema Composition
+
+**Root schema:**
+```graphql
+# schema.graphqls
+schema {
+  query: Query
+  mutation: Mutation
+}
+
+type Query {
+  # User queries
+  user(id: ID!): User
+  users(filter: UserFilter, pagination: PaginationInput): UserConnection!
+
+  # Event queries
+  event(id: ID!): Event
+  events(filter: EventFilter, pagination: PaginationInput): EventConnection!
+}
+
+type Mutation {
+  # User mutations
+  createUser(input: CreateUserInput!): CreateUserPayload!
+  updateUser(id: ID!, input: UpdateUserInput!): UpdateUserPayload!
+
+  # Event mutations
+  createEvent(input: CreateEventInput!): CreateEventPayload!
+  updateEvent(id: ID!, input: UpdateEventInput!): UpdateEventPayload!
+}
+```
+
+---
+
+## 8. Custom Scalars (RECOMMENDED)
+
+**Use custom scalars for domain-specific types:**
+
+```graphql
+# scalars.graphqls
+scalar DateTime  # ISO-8601 timestamp
+scalar Date      # ISO-8601 date (no time)
+scalar Email     # Validated email address
+scalar URL       # Validated URL
+scalar JSON      # Arbitrary JSON object
+```
+
+**Implementation (Spring GraphQL):**
+```java
+@Configuration
+public class ScalarConfiguration {
+    @Bean
+    public RuntimeWiringConfigurer runtimeWiringConfigurer() {
+        return wiringBuilder -> wiringBuilder
+            .scalar(ExtendedScalars.DateTime)
+            .scalar(ExtendedScalars.Date)
+            .scalar(ExtendedScalars.Url)
+            .scalar(ExtendedScalars.Json);
+    }
+}
+```
+
+---
+
+## 9. Testing GraphQL APIs (MANDATORY)
+
+### 9.1 Integration Tests
+
+**Test GraphQL queries/mutations with real schema:**
+
+```java
+@SpringBootTest
+@AutoConfigureGraphQlTester
+class EventResolverIT {
+
+    @Autowired
+    private GraphQlTester graphQlTester;
+
+    @Test
+    void shouldCreateEvent() {
+        String mutation = """
+            mutation CreateEvent($input: CreateEventInput!) {
+                createEvent(input: $input) {
+                    success
+                    event { id title }
+                    errors { message code }
+                }
+            }
+            """;
+
+        graphQlTester.document(mutation)
+            .variable("input", Map.of(
+                "title", "Birthday Party",
+                "startTime", "2025-12-31T18:00:00Z",
+                "endTime", "2025-12-31T22:00:00Z"
+            ))
+            .execute()
+            .path("createEvent.success").entity(Boolean.class).isEqualTo(true)
+            .path("createEvent.event.title").entity(String.class).isEqualTo("Birthday Party")
+            .path("createEvent.errors").entityList(Object.class).hasSize(0);
+    }
+
+    @Test
+    void shouldReturnValidationError_whenTitleTooShort() {
+        String mutation = """
+            mutation CreateEvent($input: CreateEventInput!) {
+                createEvent(input: $input) {
+                    success
+                    errors { message field code }
+                }
+            }
+            """;
+
+        graphQlTester.document(mutation)
+            .variable("input", Map.of(
+                "title", "AB",  // Too short
+                "startTime", "2025-12-31T18:00:00Z",
+                "endTime", "2025-12-31T22:00:00Z"
+            ))
+            .execute()
+            .path("createEvent.success").entity(Boolean.class).isEqualTo(false)
+            .path("createEvent.errors[0].code").entity(String.class).isEqualTo("VALIDATION_ERROR")
+            .path("createEvent.errors[0].field").entity(String.class).isEqualTo("title");
+    }
+}
+```
+
+---
+
+## 10. Cursor Operating Rules (CRITICAL)
+
+**Cursor MUST:**
+- Follow schema-first design (write schema before implementation)
+- Use Input objects for all mutations
+- Return Payload types from mutations (not entities directly)
+- Implement pagination for unbounded lists
+- Validate inputs at resolver layer
+- Return validation errors in payload `errors` field
+- Use `ErrorCode` enum for machine-readable errors
+
+**Cursor MUST NOT:**
+- Invent schema patterns not documented here
+- Return raw entities from mutations
+- Skip pagination for unbounded lists
+- Expose stack traces or database errors to clients
+- Use generic error messages
+
+**When in doubt → STOP AND ASK.**
+
+---
+
+## 11. Example: Complete Mutation Flow
+
+**Schema:**
+```graphql
+input CreateEventInput {
+  title: String!
+  description: String
+  startTime: DateTime!
+  endTime: DateTime!
+  maxAttendees: Int
+}
+
+type CreateEventPayload {
+  event: Event
+  errors: [UserError!]!
+  success: Boolean!
+}
+
+type Mutation {
+  createEvent(input: CreateEventInput!): CreateEventPayload!
+}
+```
+
+**Resolver:**
+```java
+@Controller
+public class EventResolver {
+    private final EventService eventService;
+
+    @MutationMapping
+    public CreateEventPayload createEvent(@Valid @Argument CreateEventInput input) {
+        return eventService.createEvent(input);
+    }
+}
+```
+
+**Service:**
+```java
+@Service
+public class EventService {
+    private final EventRepository eventRepository;
+
+    public CreateEventPayload createEvent(CreateEventInput input) {
+        List<UserError> errors = new ArrayList<>();
+
+        // Business validation
+        if (input.endTime().isBefore(input.startTime())) {
+            errors.add(new UserError(
+                "End time must be after start time",
+                "endTime",
+                ErrorCode.VALIDATION_ERROR
+            ));
+        }
+
+        if (eventRepository.existsByTitle(input.title())) {
+            errors.add(new UserError(
+                "Event with this title already exists",
+                "title",
+                ErrorCode.DUPLICATE_ENTRY
+            ));
+        }
+
+        if (!errors.isEmpty()) {
+            return new CreateEventPayload(null, errors, false);
+        }
+
+        // Create event
+        Event event = new Event(input.title(), input.description(), input.startTime(), input.endTime());
+        event = eventRepository.save(event);
+
+        return new CreateEventPayload(event, List.of(), true);
+    }
+}
+```
+
+---
+
+## 12. Domain README Documentation (MANDATORY)
+
+**Each domain MUST have a `README.md` file documenting all changes, use cases, and reasoning.**
+
+### 12.1 Purpose
+
+Domain READMEs serve as:
+- **Living documentation** of domain evolution
+- **Cross-session context** for future work
+- **Institutional knowledge** capturing "why" decisions
+- **Change log** with rationale and use cases
+
+### 12.2 Location
+
+**Pattern:**
+```
+src/main/java/com/hestia/[domain]/README.md
+```
+
+**Examples:**
+```
+src/main/java/com/hestia/user/README.md
+src/main/java/com/hestia/event/README.md
+src/main/java/com/hestia/invitation/README.md
+```
+
+### 12.3 README Template
+
+Every domain README should follow this structure:
+
+```markdown
+# [Domain Name] Domain
+
+**Ticket(s):** [INV-XX, INV-YY]
+**PR:** #XX
+
+## Requirements
+
+### [Use Case 1]
+- Description of business requirement
+- User flow
+- Acceptance criteria
+
+### [Use Case 2]
+...
+
+## Domain Model
+
+**Entities:**
+- `User`: [Brief description]
+- `Event`: [Brief description]
+
+**Value Objects:**
+- `Email`: [Brief description]
+- `Address`: [Brief description]
+
+**Aggregates:**
+- `UserAggregate`: [Root entity + value objects]
+
+## GraphQL API
+
+### Queries
+```graphql
+type Query {
+  user(id: ID!): User
+  users(filter: UserFilter): UserConnection!
+}
+```
+
+### Mutations
+```graphql
+type Mutation {
+  createUser(input: CreateUserInput!): CreateUserPayload!
+}
+```
+
+### Error Codes
+- `USER_NOT_FOUND`: When user ID doesn't exist
+- `EMAIL_ALREADY_EXISTS`: When email is already registered
+
+## Database Schema
+
+**Tables:**
+- `users`: [Columns: id, email, first_name, last_name, created_at, updated_at]
+
+**Indexes:**
+- `idx_users_email`: Unique index on email
+
+**Migrations:**
+- `V001__create_users_table.sql`
+- `V010__add_users_organization_id.sql`
+
+## File Structure
+
+```
+user/
+├── domain/
+│   ├── User.java               # Entity
+│   ├── Email.java              # Value Object
+│   └── UserRepository.java     # Repository interface
+├── application/
+│   ├── UserService.java        # Application service
+│   └── commands/
+│       └── CreateUserCommand.java
+├── infrastructure/
+│   ├── JpaUserRepository.java  # JPA implementation
+│   └── persistence/
+│       └── UserEntity.java     # JPA entity
+└── graphql/
+    ├── UserResolver.java       # GraphQL resolver
+    └── types.graphqls          # GraphQL schema
+```
+
+## Validation Rules
+
+| Field | Rule |
+|-------|------|
+| Email | Required, valid email format, unique |
+| First Name | Required, 1-100 characters |
+| Last Name | Required, 1-100 characters |
+
+## Architecture Decisions
+
+### [Decision 1]: [Title]
+**Date:** YYYY-MM-DD
+**Context:** [Why this decision was needed]
+**Decision:** [What was decided]
+**Consequences:** [Impact of this decision]
+
+## Bug Fixes & Improvements
+
+### [Date] - [Commit SHA] - [Title]
+**Problem:** [What was broken or suboptimal]
+**Root Cause:** [Why it happened]
+**Solution:** [How it was fixed]
+**Impact:** [What improved]
+
+## Backend Integration
+
+### TODO
+- [ ] Add unit tests for Email value object validation
+- [ ] Add integration test for duplicate email handling
+- [ ] Document error response format in GraphQL schema
+
+### Completed
+- [x] User creation mutation
+- [x] Email uniqueness validation
+```
+
+### 12.4 When to Update Domain README
+
+**ALWAYS update the domain README when:**
+
+1. **Adding new GraphQL types/queries/mutations:**
+   - Document new API endpoints
+   - Document error codes
+   - Document validation rules
+
+2. **Making schema changes:**
+   - Document database migrations
+   - Document rationale for schema changes
+
+3. **Fixing bugs:**
+   - Document problem, root cause, solution
+   - Reference commit SHA
+
+4. **Adding new use cases:**
+   - Document requirements
+   - Document user flows
+
+5. **Making architectural decisions:**
+   - Document context, decision, consequences
+   - Follow Architecture Decision Record (ADR) format
+
+### 12.5 Pre-Commit Reminder
+
+The `.githooks/pre-commit-governance-check` hook will remind you to update domain READMEs before committing.
+
+---
+
+## Final GraphQL Principle
+
+> GraphQL schema is a contract. Design it carefully, keep it consistent, and make breaking changes explicit.
+
+If a schema design increases ambiguity or breaks existing clients without clear benefit, it must be rejected.
+
+> **Domain READMEs capture "why" decisions, not just "what" code.** They provide cross-session context for future work.
