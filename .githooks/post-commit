@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+# Post-commit hook for Hestia Backend
+# Provides async task reminders for Claude Code after commits
+
+set -e  # Exit on first error
+
+echo ""
+echo "✅ Commit successful!"
+echo ""
+
+# Get commit information
+COMMIT_HASH=$(git rev-parse --short HEAD)
+COMMIT_MESSAGE=$(git log -1 --pretty=%B)
+
+echo "📋 Async Task Reminders for Claude:"
+echo ""
+echo "   Commit: $COMMIT_HASH"
+echo "   Message: $(echo "$COMMIT_MESSAGE" | head -1)"
+echo ""
+echo "🔄 Please complete these follow-up tasks:"
+echo ""
+
+# Task 1: Linear ticket update
+echo "   1. 📝 Update Linear Ticket"
+echo "      - Add commit description to relevant Linear ticket"
+echo "      - Use Linear MCP to add a comment (e.g., create_comment on the issue)"
+echo "      - Include: commit hash, summary of changes, files modified"
+echo ""
+
+# Task 2: PR mergeability check
+echo "   2. 🔀 Check PR Mergeability"
+echo "      - Verify PR is in mergeable state (if PR exists)"
+echo "      - Use: gh pr view --json mergeable,mergeStateStatus"
+echo "      - If not mergeable: resolve conflicts, address review comments"
+echo ""
+
+# Task 3: Test verification
+echo "   3. 🧪 Verify Tests"
+echo "      - Run unit tests: mvn test"
+echo "      - Run integration tests (if needed): mvn -P it verify"
+echo "      - Ensure all tests pass for this commit"
+echo "      - Consider full test suite for significant changes"
+echo ""
+
+# Task 4: Domain README update check
+echo "   4. 📚 Domain README Updates"
+echo "      - Check if domain README needs updates:"
+echo "        • hestia-user/src/main/java/com/hestia/user/README.md"
+echo "        • hestia-event/src/main/java/com/hestia/event/README.md"
+echo "        • hestia-invitation/src/main/java/com/hestia/invitation/README.md"
+echo ""
+echo "      What to document:"
+echo "      ┌─ Domain Changes"
+echo "      │  • What: Classes/methods added, modified, or removed"
+echo "      │  • Why: Business requirements, use cases this supports"
+echo "      │  • Business Rules: New validation rules or domain constraints"
+echo "      │"
+echo "      ├─ Database Schema Changes"
+echo "      │  • Migration files: V00X__description.sql (with rollback strategy)"
+echo "      │  • New tables/columns with purpose and constraints"
+echo "      │  • Indexes added for performance (with justification)"
+echo "      │  • Foreign keys and relationships"
+echo "      │"
+echo "      ├─ GraphQL API Changes"
+echo "      │  • New queries/mutations with examples"
+echo "      │  • Input/output types with field descriptions"
+echo "      │  • Error codes specific to this domain"
+echo "      │  • Breaking changes (if any) with migration guide"
+echo "      │"
+echo "      ├─ Architecture Decisions (ADRs)"
+echo "      │  • Decision: What was decided (e.g., 'Use PostgreSQL JSONB for...')"
+echo "      │  • Context: Why was this decision needed"
+echo "      │  • Consequences: Trade-offs, benefits, risks"
+echo "      │  • Alternatives considered (and why rejected)"
+echo "      │"
+echo "      ├─ Testing Coverage"
+echo "      │  • Unit tests: Domain logic tests added/updated"
+echo "      │  • Integration tests: GraphQL API tests with examples"
+echo "      │  • Test data: New seed data or test fixtures"
+echo "      │"
+echo "      └─ Bug Fixes & Improvements"
+echo "         • Issue: Description of the problem"
+echo "         • Root cause: Why the bug occurred"
+echo "         • Fix: How it was resolved"
+echo "         • Prevention: How to avoid similar bugs"
+echo ""
+
+echo "💡 These tasks should be completed before marking work as done."
+echo ""
+
+exit 0

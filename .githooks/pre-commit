@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Pre-commit hook for Hestia Backend
+# This hook runs before each commit to ensure code quality and governance compliance
+
+set -e  # Exit on first error
+
+echo "🔍 Running pre-commit checks..."
+echo ""
+
+# Note: Spotless check disabled due to Java 25 compatibility issues
+# To manually check formatting, run: mvn spotless:check
+# To apply formatting, run: mvn spotless:apply
+
+# 1. Run governance check (reminder only, does not block)
+if [ -f .githooks/pre-commit-governance-check ]; then
+    .githooks/pre-commit-governance-check
+fi
+
+echo ""
+echo "✅ Pre-commit checks passed!"
+echo ""
+
+exit 0

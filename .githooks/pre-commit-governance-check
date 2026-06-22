@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Governance & Documentation Reminder (non-blocking)
+# Reminds Claude Code to update governance documentation before commits
+
+echo "🔍 Governance & Documentation Check:"
+echo ""
+echo "📋 Governance Updates (.cursor/rules/*.mdc):"
+echo "   - Have you identified learnings that should become patterns?"
+echo "   - Have you documented new conventions or architecture decisions?"
+echo ""
+echo "💡 Note: Domain README updates are handled in post-commit hook."
+echo ""
+
+exit 0
