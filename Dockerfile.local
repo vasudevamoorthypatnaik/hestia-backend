@@ -1,0 +1,44 @@
+# =============================================================================
+# Runtime-only Dockerfile for local deploys.
+# Expects a pre-built JAR passed via build context (not built inside Docker).
+# This avoids running Maven under QEMU emulation on Intel Macs.
+#
+# Usage (called by local-deploy.sh):
+#   BUILD_CTX=$(mktemp -d)
+#   cp Dockerfile.local "$BUILD_CTX/Dockerfile"
+#   cp hestia-app/target/hestia-app-*.jar "$BUILD_CTX/app.jar"
+#   docker buildx build --platform linux/arm64 --load --provenance=false -t IMAGE "$BUILD_CTX"
+#
+# See also: Dockerfile (full multi-stage build, used by GitHub Actions CI/CD)
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Stage 2: Lightweight runtime image
+# ---------------------------------------------------------------------------
+FROM eclipse-temurin:21-jre
+WORKDIR /app
+
+# Install curl for Docker HEALTHCHECK
+RUN apt-get update && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user for security
+RUN groupadd -r appuser && useradd -r -g appuser -s /sbin/nologin appuser
+
+# Copy the pre-built JAR from the build context
+COPY app.jar app.jar
+
+# JVM tuning for small instances (t4g.micro = 1GB RAM)
+ENV JAVA_OPTS="-Xms256m -Xmx512m -XX:+UseG1GC -XX:MaxGCPauseMillis=200"
+
+# deploy.sh overrides this via --env-file with SPRING_PROFILES_ACTIVE=${ENVIRONMENT}.
+# This default is only used if the container starts without the env file (shouldn't happen).
+ENV SPRING_PROFILES_ACTIVE=prod
+
+USER appuser
+EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+  CMD curl -sf http://localhost:8080/actuator/health || exit 1
+
+ENTRYPOINT ["sh", "-c", "java $JAVA_OPTS -jar app.jar"]
