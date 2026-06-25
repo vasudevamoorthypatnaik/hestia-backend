@@ -1,6 +1,7 @@
 package com.hestia.user.infrastructure.persistence;
 
 import com.hestia.user.application.UserCredentialLookup;
+import com.hestia.user.application.UserQueryService;
 import com.hestia.user.application.UserPasswordStore;
 import java.time.Instant;
 import java.util.Optional;
@@ -10,7 +11,7 @@ import org.springframework.stereotype.Repository;
 
 /** JPA adapter implementing the credential-lookup + password-store ports. */
 @Repository
-public class JpaUserAdapter implements UserCredentialLookup, UserPasswordStore {
+public class JpaUserAdapter implements UserCredentialLookup, UserPasswordStore, UserQueryService {
 
     private final UserJpaRepository repository;
 
@@ -47,6 +48,19 @@ public class JpaUserAdapter implements UserCredentialLookup, UserPasswordStore {
             throw new EmailAlreadyExistsException();
         }
         return id;
+    }
+
+    @Override
+    public Optional<MeView> findById(String userId) {
+        try {
+            return repository.findById(UUID.fromString(userId))
+                    .map(e -> new MeView(
+                            e.getId().toString(), e.getEmail(), e.getFirstName(),
+                            e.getLastName(),
+                            e.getPreferredLanguage() == null ? "en" : e.getPreferredLanguage()));
+        } catch (IllegalArgumentException ex) {
+            return Optional.empty();
+        }
     }
 
     private UserCredentials toCredentials(UserEntity e) {

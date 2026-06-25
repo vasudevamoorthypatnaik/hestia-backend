@@ -23,3 +23,12 @@ type RefreshTokenPayload {
 type LogoutPayload {
   success: Boolean!
 }
+
+"The authenticated user profile."
+type User {
+  id: ID!
+  email: String!
+  firstName: String
+  lastName: String
+  preferredLanguage: String!
+}

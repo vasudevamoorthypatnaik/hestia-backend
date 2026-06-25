@@ -7,6 +7,8 @@ schema {
 type Query {
   "Health check for monitoring."
   health: HealthStatus!
+  "The authenticated user, or null when unauthenticated (paused on the frontend without a token)."
+  me: User
 }
 
 type Mutation {
