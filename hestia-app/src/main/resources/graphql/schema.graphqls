@@ -1,0 +1,27 @@
+# Root GraphQL schema (HES-SETUP)
+schema {
+  query: Query
+  mutation: Mutation
+}
+
+type Query {
+  "Health check for monitoring."
+  health: HealthStatus!
+  "The authenticated user, or null when unauthenticated (paused on the frontend without a token)."
+  me: User
+}
+
+type Mutation {
+  "Authenticate with email + password."
+  login(input: LoginInput!): LoginPayload!
+  "Register a new user."
+  registerUser(input: RegisterUserInput!): RegisterUserPayload!
+  "Exchange a refresh token for a new access + refresh token pair."
+  refreshToken(input: RefreshTokenInput!): RefreshTokenPayload!
+  "Log out the current session (idempotent)."
+  logout: LogoutPayload!
+}
+
+type HealthStatus {
+  status: String!
+}

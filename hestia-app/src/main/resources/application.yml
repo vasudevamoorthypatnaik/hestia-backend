@@ -1,0 +1,42 @@
+spring:
+  application:
+    name: hestia-backend
+  datasource:
+    url: ${HESTIA_DB_URL:jdbc:postgresql://localhost:5432/hestia}
+    username: ${HESTIA_DB_USER:hestia}
+    password: ${HESTIA_DB_PASSWORD:hestia}
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+  graphql:
+    path: /graphql
+    schema:
+      locations: classpath:graphql/**/
+    cors:
+      # CLOSED by default (no cross-origin allowed) — deployed profiles MUST set explicit
+      # origins via HESTIA_CORS_ORIGIN_PATTERNS. The `local` profile opens it for dev
+      # (application-local.yml). Never ship a wildcard in the default config for an auth API.
+      allowed-origin-patterns: ${HESTIA_CORS_ORIGIN_PATTERNS:}
+      allowed-methods: GET,POST,OPTIONS
+      allowed-headers: "*"
+
+# JWT signing key is fail-closed (AG1): no usable default — the app refuses to start unless
+# HESTIA_JWT_SECRET is set (min 32 chars / 256 bits). Set it in your local env / test config.
+hestia:
+  jwt:
+    secret: ${HESTIA_JWT_SECRET:}
+    access-ttl-minutes: 60
+    refresh-ttl-days: 30
+
+server:
+  port: ${HESTIA_PORT:8080}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health

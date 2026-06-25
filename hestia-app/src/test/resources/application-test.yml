@@ -1,0 +1,9 @@
+spring:
+  jpa:
+    hibernate:
+      ddl-auto: validate
+  flyway:
+    enabled: true
+hestia:
+  jwt:
+    secret: test-signing-secret-key-at-least-32-bytes-long
