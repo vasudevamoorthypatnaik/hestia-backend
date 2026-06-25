@@ -1,0 +1,25 @@
+"Payload returned after a successful login."
+type LoginPayload {
+  accessToken: String!
+  refreshToken: String!
+  preferredLanguage: String!
+}
+
+"Payload returned after registration."
+type RegisterUserPayload {
+  message: String!
+  userId: ID!
+  ttlMinutes: Int!
+  preferredLanguage: String!
+}
+
+"Payload from a successful token refresh (rotated refresh token)."
+type RefreshTokenPayload {
+  accessToken: String!
+  refreshToken: String!
+}
+
+"Payload returned after a logout attempt."
+type LogoutPayload {
+  success: Boolean!
+}
