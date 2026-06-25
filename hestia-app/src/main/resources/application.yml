@@ -17,9 +17,10 @@ spring:
     schema:
       locations: classpath:graphql/**/
     cors:
-      # Local dev: allow web clients (Metro :8081, served builds) to call the GraphQL API.
-      # Tighten to specific origins for deployed environments.
-      allowed-origin-patterns: "*"
+      # CLOSED by default (no cross-origin allowed) — deployed profiles MUST set explicit
+      # origins via HESTIA_CORS_ORIGIN_PATTERNS. The `local` profile opens it for dev
+      # (application-local.yml). Never ship a wildcard in the default config for an auth API.
+      allowed-origin-patterns: ${HESTIA_CORS_ORIGIN_PATTERNS:}
       allowed-methods: GET,POST,OPTIONS
       allowed-headers: "*"
 
@@ -32,7 +33,7 @@ hestia:
     refresh-ttl-days: 30
 
 server:
-  port: ${HESTIA_PORT:8081}
+  port: ${HESTIA_PORT:8080}
 
 management:
   endpoints:

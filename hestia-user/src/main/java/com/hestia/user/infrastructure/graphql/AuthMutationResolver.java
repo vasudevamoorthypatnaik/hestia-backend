@@ -75,6 +75,8 @@ public class AuthMutationResolver {
     public Map<String, Object> registerUser(@Argument RegisterUserInput input) {
         validateEmail(input.email());
         validatePassword(input.password());
+        validateName(input.firstName(), "First name");
+        validateName(input.lastName(), "Last name");
         RegisterResult result =
                 registrationService.register(
                         input.email(),
@@ -139,6 +141,14 @@ public class AuthMutationResolver {
         // bcrypt truncates beyond 72 bytes; enforce an explicit min (policy parity with FE Zod, P6).
         if (password == null || password.length() < 8 || password.length() > 72) {
             throw new InputValidationException("Password must be 8-72 characters");
+        }
+    }
+
+    private static void validateName(String name, String label) {
+        // Optional names must fit the VARCHAR(100) column — reject overlong as BAD_REQUEST
+        // rather than letting it become a DB error. (PR review MED.)
+        if (name != null && name.length() > 100) {
+            throw new InputValidationException(label + " must be 100 characters or fewer");
         }
     }
 

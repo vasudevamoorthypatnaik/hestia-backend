@@ -40,7 +40,10 @@ public class JpaUserAdapter implements UserCredentialLookup, UserPasswordStore, 
         }
         UUID id = UUID.randomUUID();
         try {
-            repository.save(
+            // saveAndFlush forces the INSERT (and the unique-index check) to run NOW, inside this
+            // try/catch — a plain save() can defer the constraint violation to transaction commit,
+            // outside this boundary, where it would leak as an internal error. (PR review MED.)
+            repository.saveAndFlush(
                     new UserEntity(
                             id, email, firstName, lastName, passwordHash, true, "en", Instant.now()));
         } catch (DataIntegrityViolationException e) {

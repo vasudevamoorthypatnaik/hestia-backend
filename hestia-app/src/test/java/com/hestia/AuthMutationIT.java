@@ -21,7 +21,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @AutoConfigureHttpGraphQlTester
 @Testcontainers
-class AuthMutationIntegrationTest {
+class AuthMutationIT {
 
     // The hestia-notification module wires an AWS SqsAsyncClient that needs a region/creds at
     // bean-init. Provide dummy SDK system settings before the Spring context loads.
