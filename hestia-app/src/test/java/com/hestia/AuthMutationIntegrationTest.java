@@ -109,4 +109,37 @@ class AuthMutationIntegrationTest {
                                 assertThat(errors.get(0).getMessage())
                                         .isEqualTo("Invalid email or password"));
     }
+
+    @Test
+    void me_withValidToken_returnsTheUser() {
+        String email = "itest-me@hestia.app";
+        register(email);
+        String token =
+                graphQlTester
+                        .document("mutation($i:LoginInput!){login(input:$i){accessToken}}")
+                        .variable("i", java.util.Map.of("email", email, "password", PASSWORD))
+                        .execute()
+                        .path("login.accessToken")
+                        .entity(String.class)
+                        .get();
+
+        graphQlTester
+                .mutate()
+                .header("Authorization", "Bearer " + token)
+                .build()
+                .document("{me{id email firstName preferredLanguage}}")
+                .execute()
+                .path("me.email")
+                .entity(String.class)
+                .isEqualTo(email);
+    }
+
+    @Test
+    void me_withoutToken_isNull() {
+        graphQlTester
+                .document("{me{id email}}")
+                .execute()
+                .path("me")
+                .valueIsNull();
+    }
 }
