@@ -15,6 +15,9 @@ public class LoginRateLimiter {
 
     private static final int MAX_FAILED_ATTEMPTS = 5;
     private static final Duration WINDOW = Duration.ofMinutes(15);
+    // Bound memory: cap distinct tracked IPs so a flood of unique source IPs cannot grow the
+    // map without limit (memory-DoS). Expired entries are evicted opportunistically first.
+    private static final int MAX_TRACKED_IPS = 50_000;
 
     private record Attempts(int count, Instant windowStart) {}
 
@@ -31,6 +34,14 @@ public class LoginRateLimiter {
     }
 
     public void recordFailedAttempt(String ip) {
+        if (!failures.containsKey(ip) && failures.size() >= MAX_TRACKED_IPS) {
+            evictExpired();
+            if (failures.size() >= MAX_TRACKED_IPS) {
+                // Still full after eviction — drop tracking for this new IP rather than grow
+                // unbounded. Brute-forcing from an untracked IP is bounded by other controls.
+                return;
+            }
+        }
         failures.compute(
                 ip,
                 (k, a) -> {
@@ -40,6 +51,12 @@ public class LoginRateLimiter {
                     }
                     return new Attempts(a.count() + 1, a.windowStart());
                 });
+    }
+
+    private void evictExpired() {
+        Instant now = Instant.now();
+        failures.entrySet()
+                .removeIf(e -> now.isAfter(e.getValue().windowStart().plus(WINDOW)));
     }
 
     public void recordSuccessfulLogin(String ip) {

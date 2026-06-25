@@ -4,6 +4,7 @@ import com.hestia.user.application.AuthService;
 import com.hestia.user.application.AuthService.AuthenticationException;
 import com.hestia.user.application.AuthService.LoginResult;
 import com.hestia.user.application.AuthService.RefreshResult;
+import com.hestia.user.application.InputValidationException;
 import com.hestia.user.application.LoginRateLimiter;
 import com.hestia.user.application.RegistrationService;
 import com.hestia.user.application.RegistrationService.RegisterResult;
@@ -61,6 +62,8 @@ public class AuthMutationResolver {
     public Map<String, String> login(
             @Argument LoginInput input,
             @ContextValue(name = "clientIpAddress", required = false) String clientIp) {
+        validateEmail(input.email());
+        validatePassword(input.password());
         LoginResult result = authService.login(input.email(), input.password(), clientIp);
         return Map.of(
                 "accessToken", result.accessToken(),
@@ -70,6 +73,8 @@ public class AuthMutationResolver {
 
     @MutationMapping
     public Map<String, Object> registerUser(@Argument RegisterUserInput input) {
+        validateEmail(input.email());
+        validatePassword(input.password());
         RegisterResult result =
                 registrationService.register(
                         input.email(),
@@ -119,6 +124,28 @@ public class AuthMutationResolver {
     public GraphQLError handleEmailExists(
             EmailAlreadyExistsException ex, DataFetchingEnvironment env) {
         return error(ErrorType.BAD_REQUEST, "Email already registered", env);
+    }
+
+    private static final java.util.regex.Pattern EMAIL =
+            java.util.regex.Pattern.compile("^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$");
+
+    private static void validateEmail(String email) {
+        if (email == null || email.isBlank() || email.length() > 254 || !EMAIL.matcher(email).matches()) {
+            throw new InputValidationException("Enter a valid email address");
+        }
+    }
+
+    private static void validatePassword(String password) {
+        // bcrypt truncates beyond 72 bytes; enforce an explicit min (policy parity with FE Zod, P6).
+        if (password == null || password.length() < 8 || password.length() > 72) {
+            throw new InputValidationException("Password must be 8-72 characters");
+        }
+    }
+
+    @GraphQlExceptionHandler
+    public GraphQLError handleInputValidation(
+            InputValidationException ex, DataFetchingEnvironment env) {
+        return error(ErrorType.BAD_REQUEST, ex.getMessage(), env);
     }
 
     private static GraphQLError error(
