@@ -259,11 +259,9 @@ public class HouseholdCalendarServiceImpl implements HouseholdCalendarService {
                         .getDayOfWeek()
                         .getDisplayName(TextStyle.SHORT, Locale.ENGLISH);
         String time = ev.allDay() ? "all-day" : ev.timeLabel();
-        String owner = ev.ownerMembers().isEmpty() ? "someone" : ev.ownerMembers().get(0).displayName();
-        String label = dayShort + " " + time + " — " + owner + "'s " + lower(ev.title())
-                + " has no responsible adult.";
-        String shortLabel = dayShort + " " + time + " — " + owner + " " + lower(ev.title())
-                + " unassigned";
+        // The title already names the subject (e.g. "Pickup — Maya"); don't re-prepend the owner.
+        String label = dayShort + " " + time + " — " + ev.title() + " has no responsible adult.";
+        String shortLabel = dayShort + " " + time + " — " + ev.title() + " · unassigned";
         return new CoverageGapView(ev.id(), label, shortLabel);
     }
 
@@ -377,10 +375,6 @@ public class HouseholdCalendarServiceImpl implements HouseholdCalendarService {
         } catch (NumberFormatException ex) {
             throw new InvalidEventException("Time must be HH:mm.");
         }
-    }
-
-    private static String lower(String s) {
-        return s == null ? "" : s.toLowerCase(Locale.ENGLISH);
     }
 
     private static String blankToNull(String s) {
