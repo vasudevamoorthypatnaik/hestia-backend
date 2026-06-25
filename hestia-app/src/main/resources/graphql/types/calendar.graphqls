@@ -1,0 +1,126 @@
+# Household Calendar types (HES-CAL). All computed values (timeLabel, isCoverageGap, load
+# percentages, colorHex, period window) are produced by the backend — the frontend renders them.
+# Date/time values are ISO-8601 strings (no custom scalars).
+
+type HouseholdCalendar {
+  household: Household!
+  period: CalendarPeriod!
+  members: [HouseholdMember!]!
+  events: [CalendarEvent!]!
+  coverageGaps: [CoverageGap!]!
+  load: WeeklyLoad!
+  connectedAccounts: [ConnectedAccount!]!
+}
+
+enum CalendarRange {
+  DAY
+  WEEK
+}
+
+type CalendarPeriod {
+  "DAY or WEEK."
+  range: CalendarRange!
+  "ISO date (yyyy-MM-dd) of the first day in the window."
+  start: String!
+  "ISO date of the last day in the window."
+  end: String!
+  "Human label, e.g. 'Jun 23 – 29, 2026' or 'Thursday June 26'."
+  label: String!
+  timezone: String!
+}
+
+type Household {
+  id: ID!
+  name: String!
+  timezone: String!
+}
+
+enum MemberKind {
+  ADULT
+  CHILD
+}
+
+enum MemberRole {
+  ADMIN
+  MEMBER
+  NONE
+}
+
+type HouseholdMember {
+  id: ID!
+  displayName: String!
+  "Single-letter avatar initial."
+  initial: String!
+  "Authoritative per-person color (e.g. '#C4603D')."
+  colorHex: String!
+  kind: MemberKind!
+  role: MemberRole!
+  "True for adults who can be a responsible adult."
+  isResponsibleCapable: Boolean!
+  "Age label for children (e.g. '8'), null for adults."
+  ageLabel: String
+}
+
+type CalendarEvent {
+  id: ID!
+  title: String!
+  "ISO-8601 instant for the start, null when allDay."
+  start: String
+  "ISO-8601 instant for the end, null when allDay/open-ended."
+  end: String
+  allDay: Boolean!
+  "Backend-formatted label, e.g. '4:00 – 5:30', '9:00', 'All day'."
+  timeLabel: String!
+  "1=Mon .. 7=Sun for the occurrence."
+  dayOfWeek: Int!
+  "ISO date of the occurrence."
+  date: String!
+  "Whom the event is about (color comes from the primary owner)."
+  ownerMembers: [HouseholdMember!]!
+  "Which adult is responsible for logistics; null => coverage gap when a driver is needed."
+  responsibleMember: HouseholdMember
+  colorHex: String!
+  location: String
+  needsDriver: Boolean!
+  "True when this event needs a responsible adult but has none."
+  isCoverageGap: Boolean!
+}
+
+type CoverageGap {
+  eventId: ID!
+  "Full sentence, e.g. \"Fri 3:30 — Maya's pickup has no responsible adult.\""
+  label: String!
+  "Compact label, e.g. 'Fri 3:30 — Maya pickup unassigned'."
+  shortLabel: String!
+}
+
+type WeeklyLoad {
+  total: Int!
+  "Optional nudge, e.g. 'Pallavi is carrying a bit more this week.'"
+  summaryLabel: String
+  entries: [LoadEntry!]!
+}
+
+type LoadEntry {
+  member: HouseholdMember!
+  count: Int!
+  "Share of the responsible-event total, 0–100."
+  percent: Int!
+}
+
+enum SyncStatus {
+  SYNCED
+  DISCONNECTED
+}
+
+type ConnectedAccount {
+  id: ID!
+  provider: String!
+  label: String!
+  status: SyncStatus!
+  statusLabel: String!
+}
+
+type CreateCalendarEventPayload {
+  event: CalendarEvent!
+}

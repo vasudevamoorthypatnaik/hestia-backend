@@ -1,0 +1,24 @@
+# Household Calendar inputs (HES-CAL).
+
+input CalendarPeriodInput {
+  "ISO date (yyyy-MM-dd) anchoring the window; the server resolves the window in the household tz."
+  anchor: String!
+  range: CalendarRange!
+}
+
+input CreateCalendarEventInput {
+  title: String!
+  "ISO date (yyyy-MM-dd) the event occurs on."
+  date: String!
+  "24h 'HH:mm', null when allDay."
+  startTime: String
+  "24h 'HH:mm', optional."
+  endTime: String
+  allDay: Boolean!
+  "≥1 owner member id."
+  ownerMemberIds: [ID!]!
+  "Responsible adult member id; null => Unassigned (coverage gap if a driver is needed)."
+  responsibleMemberId: ID
+  needsDriver: Boolean!
+  location: String
+}
