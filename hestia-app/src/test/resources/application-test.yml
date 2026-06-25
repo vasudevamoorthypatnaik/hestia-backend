@@ -4,6 +4,8 @@ spring:
       ddl-auto: validate
   flyway:
     enabled: true
+    # Tests need the demo seed (db/seed/V9xx) in addition to schema migrations.
+    locations: classpath:db/migration,classpath:db/seed
 hestia:
   jwt:
     secret: test-signing-secret-key-at-least-32-bytes-long

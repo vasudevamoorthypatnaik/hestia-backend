@@ -9,6 +9,8 @@ type Query {
   health: HealthStatus!
   "The authenticated user, or null when unauthenticated (paused on the frontend without a token)."
   me: User
+  "The authenticated user's household calendar for the requested period (HES-CAL)."
+  householdCalendar(period: CalendarPeriodInput!): HouseholdCalendar!
 }
 
 type Mutation {
@@ -20,6 +22,8 @@ type Mutation {
   refreshToken(input: RefreshTokenInput!): RefreshTokenPayload!
   "Log out the current session (idempotent)."
   logout: LogoutPayload!
+  "Create a calendar event in the authenticated user's household (HES-CAL)."
+  createCalendarEvent(input: CreateCalendarEventInput!): CreateCalendarEventPayload!
 }
 
 type HealthStatus {
