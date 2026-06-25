@@ -5,13 +5,17 @@ import com.hestia.event.application.CreateEventCommand;
 import com.hestia.event.application.HouseholdCalendarService;
 import com.hestia.event.application.InvalidEventException;
 import com.hestia.event.application.UnauthenticatedException;
+import graphql.GraphQLError;
+import graphql.schema.DataFetchingEnvironment;
 import java.time.LocalDate;
 import java.time.format.DateTimeParseException;
 import java.util.List;
 import java.util.UUID;
 import org.springframework.graphql.data.method.annotation.Argument;
 import org.springframework.graphql.data.method.annotation.ContextValue;
+import org.springframework.graphql.data.method.annotation.GraphQlExceptionHandler;
 import org.springframework.graphql.data.method.annotation.MutationMapping;
+import org.springframework.graphql.execution.ErrorType;
 import org.springframework.stereotype.Controller;
 
 /** `createCalendarEvent` mutation — auth-gated, server-side validated (TAC-11). */
@@ -69,6 +73,17 @@ public class CalendarEventMutationResolver {
         } catch (IllegalArgumentException ex) {
             throw new InvalidEventException("Invalid " + field + " id.");
         }
+    }
+
+    @GraphQlExceptionHandler
+    public GraphQLError handleInvalidEvent(InvalidEventException ex, DataFetchingEnvironment env) {
+        return CalendarErrors.error(ErrorType.BAD_REQUEST, ex.getMessage(), env);
+    }
+
+    @GraphQlExceptionHandler
+    public GraphQLError handleUnauthenticated(
+            UnauthenticatedException ex, DataFetchingEnvironment env) {
+        return CalendarErrors.error(ErrorType.UNAUTHORIZED, ex.getMessage(), env);
     }
 
     /** Maps the GraphQL {@code CreateCalendarEventInput}. */

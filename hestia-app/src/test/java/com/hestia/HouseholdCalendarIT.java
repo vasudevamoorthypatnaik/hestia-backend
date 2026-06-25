@@ -116,7 +116,11 @@ class HouseholdCalendarIT {
                 .variable("p", Map.of("anchor", "2026-06-24", "range", "WEEK"))
                 .execute()
                 .errors()
-                .satisfy(errors -> assertThat(errors).isNotEmpty());
+                .satisfy(
+                        errors -> {
+                            assertThat(errors).isNotEmpty();
+                            assertThat(errors.get(0).getMessage()).contains("Authentication required");
+                        });
     }
 
     @Test
@@ -195,6 +199,10 @@ class HouseholdCalendarIT {
                                 "needsDriver", false))
                 .execute()
                 .errors()
-                .satisfy(errors -> assertThat(errors).isNotEmpty());
+                .satisfy(
+                        errors -> {
+                            assertThat(errors).isNotEmpty();
+                            assertThat(errors.get(0).getMessage()).contains("Title is required");
+                        });
     }
 }
