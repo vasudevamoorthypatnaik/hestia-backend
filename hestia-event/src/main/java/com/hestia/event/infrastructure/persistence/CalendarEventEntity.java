@@ -13,6 +13,7 @@ import java.time.LocalDate;
 import java.util.LinkedHashSet;
 import java.util.Set;
 import java.util.UUID;
+import org.hibernate.annotations.BatchSize;
 
 /** JPA entity for the {@code calendar_event} table (V002), with owner ids in {@code event_owner}. */
 @Entity
@@ -58,7 +59,10 @@ public class CalendarEventEntity {
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
 
+    // BatchSize collapses owner loads across events into a single IN query (avoids N+1 when a
+    // household's events are read together in householdCalendar).
     @ElementCollection(fetch = FetchType.EAGER)
+    @BatchSize(size = 100)
     @CollectionTable(name = "event_owner", joinColumns = @JoinColumn(name = "event_id"))
     @Column(name = "member_id", nullable = false)
     private Set<UUID> ownerMemberIds = new LinkedHashSet<>();

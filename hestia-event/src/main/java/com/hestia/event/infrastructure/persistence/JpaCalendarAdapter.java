@@ -35,8 +35,8 @@ public class JpaCalendarAdapter implements HouseholdRepository, CalendarEventRep
 
     @Override
     public Optional<Household> findDefaultHousehold() {
-        return households.findAll().stream()
-                .min((a, b) -> a.getCreatedAt().compareTo(b.getCreatedAt()))
+        return households
+                .findTop1ByOrderByCreatedAtAsc()
                 .map(h -> new Household(h.getId(), h.getName(), h.getTimezone()));
     }
 
