@@ -41,6 +41,9 @@ public class HouseholdCalendarServiceImpl implements HouseholdCalendarService {
     private final HouseholdRepository households;
     private final CalendarEventRepository events;
 
+    /** Neutral fallback when an event has no resolvable owner (NOT a member color). */
+    private static final String DEFAULT_EVENT_COLOR = "#8A7F70";
+
     public HouseholdCalendarServiceImpl(
             HouseholdRepository households, CalendarEventRepository events) {
         this.households = households;
@@ -55,7 +58,7 @@ public class HouseholdCalendarServiceImpl implements HouseholdCalendarService {
                         .findDefaultHousehold()
                         .orElseThrow(() -> new IllegalStateException("No seeded household"));
         ZoneId zone = ZoneId.of(household.timezone());
-        LocalDate anchor = LocalDate.parse(anchorIso);
+        LocalDate anchor = parseAnchor(anchorIso);
         LocalDate start = range == CalendarRange.WEEK ? anchor.with(DayOfWeek.MONDAY) : anchor;
         LocalDate end = range == CalendarRange.WEEK ? start.plusDays(6) : anchor;
 
@@ -138,10 +141,10 @@ public class HouseholdCalendarServiceImpl implements HouseholdCalendarService {
                                         HouseholdMember::id,
                                         HouseholdCalendarServiceImpl::toMemberView));
 
-        validate(cmd, byId);
-
+        // Parse once (parseMinutes also validates the HH:mm format), then validate the rest.
         Integer startMin = cmd.allDay() ? null : parseMinutes(cmd.startTime());
         Integer endMin = cmd.allDay() || cmd.endTime() == null ? null : parseMinutes(cmd.endTime());
+        validate(cmd, byId, startMin, endMin);
 
         CalendarEventData toSave =
                 new CalendarEventData(
@@ -164,9 +167,19 @@ public class HouseholdCalendarServiceImpl implements HouseholdCalendarService {
 
     // ----- validation -----
 
-    private void validate(CreateEventCommand cmd, Map<UUID, HouseholdMember> byId) {
+    private void validate(
+            CreateEventCommand cmd,
+            Map<UUID, HouseholdMember> byId,
+            Integer startMin,
+            Integer endMin) {
         if (cmd.title() == null || cmd.title().isBlank()) {
             throw new InvalidEventException("Title is required.");
+        }
+        if (cmd.title().trim().length() > 200) {
+            throw new InvalidEventException("Title must be 200 characters or fewer.");
+        }
+        if (cmd.location() != null && cmd.location().length() > 255) {
+            throw new InvalidEventException("Location must be 255 characters or fewer.");
         }
         if (cmd.date() == null) {
             throw new InvalidEventException("Date is required.");
@@ -188,15 +201,13 @@ public class HouseholdCalendarServiceImpl implements HouseholdCalendarService {
             if (resp.kind() != MemberKind.ADULT) {
                 throw new InvalidEventException("Responsible adult must be an adult.");
             }
-        }
-        if (!cmd.allDay()) {
-            int s = parseMinutes(cmd.startTime());
-            if (cmd.endTime() != null) {
-                int e = parseMinutes(cmd.endTime());
-                if (e <= s) {
-                    throw new InvalidEventException("End time must be after start time.");
-                }
+            if (!resp.responsibleCapable()) {
+                throw new InvalidEventException(
+                        "That adult cannot be assigned as the responsible adult.");
             }
+        }
+        if (!cmd.allDay() && startMin != null && endMin != null && endMin <= startMin) {
+            throw new InvalidEventException("End time must be after start time.");
         }
     }
 
@@ -219,9 +230,14 @@ public class HouseholdCalendarServiceImpl implements HouseholdCalendarService {
                 e.ownerMemberIds().stream().filter(viewById::containsKey).map(viewById::get).toList();
         MemberView responsible =
                 e.responsibleMemberId() == null ? null : viewById.get(e.responsibleMemberId());
-        boolean coverageGap = e.responsibleMemberId() == null && e.needsDriver();
+        // Coverage gap = a TIMED duty needing a driver with no responsible adult. All-day items are
+        // excluded (an all-day "pickup" is nonsensical and would carry a misleading time label).
+        boolean coverageGap = e.responsibleMemberId() == null && e.needsDriver() && !e.allDay();
         String colorHex =
-                owners.isEmpty() ? "#C4603D" : owners.get(0).colorHex(); // primary owner color
+                owners.isEmpty() ? DEFAULT_EVENT_COLOR : owners.get(0).colorHex(); // primary owner color
+        // NOTE (DST): a recurring local time falling in a spring-forward gap is rolled forward one
+        // hour by atZone(); the start/end instant then differs from timeLabel by the gap. Rare for
+        // the seeded times; acceptable for this slice (documented follow-up if exact-instant matters).
         String startIso =
                 e.allDay() || e.startMinute() == null
                         ? null
@@ -258,7 +274,7 @@ public class HouseholdCalendarServiceImpl implements HouseholdCalendarService {
                 LocalDate.parse(ev.date())
                         .getDayOfWeek()
                         .getDisplayName(TextStyle.SHORT, Locale.ENGLISH);
-        String time = ev.allDay() ? "all-day" : ev.timeLabel();
+        String time = ev.timeLabel(); // unified with the event's own label ("All day" for all-day)
         // The title already names the subject (e.g. "Pickup — Maya"); don't re-prepend the owner.
         String label = dayShort + " " + time + " — " + ev.title() + " has no responsible adult.";
         String shortLabel = dayShort + " " + time + " — " + ev.title() + " · unassigned";
@@ -283,16 +299,28 @@ public class HouseholdCalendarServiceImpl implements HouseholdCalendarService {
         }
         final int totalF = total;
         List<LoadEntryView> entries =
-                counts.entrySet().stream()
-                        .filter(en -> en.getValue() > 0)
-                        .map(
-                                en ->
-                                        new LoadEntryView(
-                                                adultViews.get(en.getKey()),
-                                                en.getValue(),
-                                                totalF == 0 ? 0 : Math.round(en.getValue() * 100f / totalF)))
-                        .sorted(Comparator.comparingInt(LoadEntryView::count).reversed())
-                        .toList();
+                new ArrayList<>(
+                        counts.entrySet().stream()
+                                .filter(en -> en.getValue() > 0)
+                                .map(
+                                        en ->
+                                                new LoadEntryView(
+                                                        adultViews.get(en.getKey()),
+                                                        en.getValue(),
+                                                        totalF == 0
+                                                                ? 0
+                                                                : Math.round(en.getValue() * 100f / totalF)))
+                                .sorted(Comparator.comparingInt(LoadEntryView::count).reversed())
+                                .toList());
+        // Independent Math.round per adult need not sum to 100 (e.g. 33+33+33=99). Assign the
+        // rounding remainder to the largest share so a stacked bar always totals exactly 100%.
+        if (!entries.isEmpty() && totalF > 0) {
+            int drift = 100 - entries.stream().mapToInt(LoadEntryView::percent).sum();
+            if (drift != 0) {
+                LoadEntryView top = entries.get(0);
+                entries.set(0, new LoadEntryView(top.member(), top.count(), top.percent() + drift));
+            }
+        }
         String summary = null;
         if (entries.size() >= 2 && entries.get(0).count() > entries.get(1).count()) {
             summary = entries.get(0).member().displayName() + " is carrying a bit more this week.";
@@ -355,6 +383,14 @@ public class HouseholdCalendarServiceImpl implements HouseholdCalendarService {
                 ? mon + " " + start.getDayOfMonth() + " – " + end.getDayOfMonth() + ", " + end.getYear()
                 : mon + " " + start.getDayOfMonth() + " – " + endMon + " " + end.getDayOfMonth() + ", "
                         + end.getYear();
+    }
+
+    private static LocalDate parseAnchor(String iso) {
+        try {
+            return LocalDate.parse(iso);
+        } catch (java.time.format.DateTimeParseException ex) {
+            throw new InvalidEventException("Anchor must be an ISO date (yyyy-MM-dd).");
+        }
     }
 
     private static int parseMinutes(String hhmm) {

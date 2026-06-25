@@ -1,6 +1,9 @@
 # Local-dev profile (activate with SPRING_PROFILES_ACTIVE=local). Opens GraphQL CORS for web
 # clients (Metro / served builds on another origin). NOT for deployed environments.
 spring:
+  # Demo seed (db/seed/V9xx) is applied in dev only — never in the default/prod location set.
+  flyway:
+    locations: classpath:db/migration,classpath:db/seed
   graphql:
     cors:
       allowed-origin-patterns: "*"

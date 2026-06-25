@@ -205,4 +205,18 @@ class HouseholdCalendarIT {
                             assertThat(errors.get(0).getMessage()).contains("Title is required");
                         });
     }
+
+    @Test
+    void malformedAnchorReturnsClassifiedError() {
+        authed()
+                .document(CAL_QUERY)
+                .variable("p", Map.of("anchor", "not-a-date", "range", "WEEK"))
+                .execute()
+                .errors()
+                .satisfy(
+                        errors -> {
+                            assertThat(errors).isNotEmpty();
+                            assertThat(errors.get(0).getMessage()).contains("ISO");
+                        });
+    }
 }

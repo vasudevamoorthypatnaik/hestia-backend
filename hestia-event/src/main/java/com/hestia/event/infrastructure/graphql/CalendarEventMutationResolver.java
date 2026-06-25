@@ -86,6 +86,11 @@ public class CalendarEventMutationResolver {
         return CalendarErrors.error(ErrorType.UNAUTHORIZED, ex.getMessage(), env);
     }
 
+    @GraphQlExceptionHandler
+    public GraphQLError handleUnavailable(IllegalStateException ex, DataFetchingEnvironment env) {
+        return CalendarErrors.error(ErrorType.INTERNAL_ERROR, ex.getMessage(), env);
+    }
+
     /** Maps the GraphQL {@code CreateCalendarEventInput}. */
     public record CreateCalendarEventInput(
             String title,

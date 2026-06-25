@@ -49,8 +49,13 @@ class HouseholdCalendarServiceTest {
     @BeforeEach
     void setUp() {
         service = new HouseholdCalendarServiceImpl(households, events);
-        when(households.findDefaultHousehold()).thenReturn(java.util.Optional.of(household));
-        when(households.members(HH)).thenReturn(List.of(pallavi, vasu, maya));
+        // lenient: the malformed-anchor test throws before members() is reached.
+        org.mockito.Mockito.lenient()
+                .when(households.findDefaultHousehold())
+                .thenReturn(java.util.Optional.of(household));
+        org.mockito.Mockito.lenient()
+                .when(households.members(HH))
+                .thenReturn(List.of(pallavi, vasu, maya));
     }
 
     @Test
@@ -186,6 +191,43 @@ class HouseholdCalendarServiceTest {
                                                 List.of(MAYA), MAYA, false, null)))
                 .isInstanceOf(InvalidEventException.class)
                 .hasMessageContaining("adult");
+    }
+
+    @Test
+    void createEventRejectsNonCapableResponsibleAdult() {
+        UUID granId = UUID.fromString("00000000-0000-0000-0000-0000000000cc");
+        HouseholdMember gran =
+                new HouseholdMember(
+                        granId, "Gran", "G", "#999999", MemberKind.ADULT, MemberRole.MEMBER, false, null, 5);
+        when(households.members(HH)).thenReturn(List.of(pallavi, gran, maya));
+        assertThatThrownBy(
+                        () ->
+                                service.createEvent(
+                                        new CreateEventCommand(
+                                                "X", LocalDate.parse("2026-06-24"), "10:00", null, false,
+                                                List.of(MAYA), granId, false, null)))
+                .isInstanceOf(InvalidEventException.class)
+                .hasMessageContaining("cannot be assigned");
+    }
+
+    @Test
+    void createEventRejectsOverlongTitle() {
+        String longTitle = "x".repeat(201);
+        assertThatThrownBy(
+                        () ->
+                                service.createEvent(
+                                        new CreateEventCommand(
+                                                longTitle, LocalDate.parse("2026-06-24"), "10:00", null,
+                                                false, List.of(MAYA), null, false, null)))
+                .isInstanceOf(InvalidEventException.class)
+                .hasMessageContaining("200");
+    }
+
+    @Test
+    void getCalendarRejectsMalformedAnchor() {
+        assertThatThrownBy(() -> service.getCalendar("not-a-date", CalendarRange.WEEK))
+                .isInstanceOf(InvalidEventException.class)
+                .hasMessageContaining("ISO");
     }
 
     @Test

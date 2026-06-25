@@ -1,4 +1,5 @@
--- V003__seed_hearth_household.sql (HES-CAL)
+-- V900__seed_hearth_household.sql (HES-CAL) — lives in db/seed/, applied ONLY under the dev/test
+-- Flyway locations (local + test profiles), never the default/prod location set.
 -- Idempotent seed of the shared demo household "The Hearth" (Pallavi/Vasu/Maya/Theo) and a week of
 -- recurring events mirroring the FLOW 3 design. Events are stored as (day_of_week, minute-of-day)
 -- so the resolver projects them onto whatever week is requested — the calendar always looks
