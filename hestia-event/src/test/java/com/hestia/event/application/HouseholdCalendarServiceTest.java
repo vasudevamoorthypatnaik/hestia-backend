@@ -243,6 +243,51 @@ class HouseholdCalendarServiceTest {
     }
 
     @Test
+    void monthRangeWindowSpansFirstThroughLastDayWithMonthLabel() {
+        when(events.findByHousehold(HH)).thenReturn(List.of());
+        when(households.connectedAccounts(HH)).thenReturn(List.of());
+
+        // anchor mid-month; service resolves the full calendar month window.
+        HouseholdCalendarView view = service.getCalendar("2026-06-15", CalendarRange.MONTH);
+
+        assertThat(view.period().start()).isEqualTo("2026-06-01"); // first day
+        assertThat(view.period().end()).isEqualTo("2026-06-30"); // last day
+        assertThat(view.period().label()).isEqualTo("June 2026");
+    }
+
+    @Test
+    void monthRangeWindowEndClampsToShortMonth() {
+        when(events.findByHousehold(HH)).thenReturn(List.of());
+        when(households.connectedAccounts(HH)).thenReturn(List.of());
+
+        // February 2026 is a non-leap month — the window must end on the 28th, not spill over.
+        HouseholdCalendarView view = service.getCalendar("2026-02-10", CalendarRange.MONTH);
+
+        assertThat(view.period().start()).isEqualTo("2026-02-01");
+        assertThat(view.period().end()).isEqualTo("2026-02-28");
+        assertThat(view.period().label()).isEqualTo("February 2026");
+    }
+
+    @Test
+    void monthRangeFansWeeklyRecurringEventOntoEveryMatchingWeekday() {
+        // A Tuesday-recurring event must project onto every Tuesday in the month (R11): the
+        // projection loop is range-agnostic, so a MONTH window fans one weekly event across ~4–5
+        // concrete dates rather than collapsing to a single week.
+        when(events.findByHousehold(HH))
+                .thenReturn(List.of(recurring(2, "Soccer — Maya", 960, 1050, VASU, MAYA, true)));
+        when(households.connectedAccounts(HH)).thenReturn(List.of());
+
+        HouseholdCalendarView view = service.getCalendar("2026-06-15", CalendarRange.MONTH);
+
+        // June 2026 Tuesdays: 2, 9, 16, 23, 30 -> five projected instances on distinct dates.
+        assertThat(view.events())
+                .extracting(EventView::date)
+                .containsExactly(
+                        "2026-06-02", "2026-06-09", "2026-06-16", "2026-06-23", "2026-06-30");
+        assertThat(view.events()).allSatisfy(e -> assertThat(e.title()).isEqualTo("Soccer — Maya"));
+    }
+
+    @Test
     void connectedAccountsCarryStatusLabel() {
         when(events.findByHousehold(HH)).thenReturn(List.of());
         when(households.connectedAccounts(HH))
