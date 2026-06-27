@@ -59,8 +59,25 @@ public class HouseholdCalendarServiceImpl implements HouseholdCalendarService {
                         .orElseThrow(() -> new IllegalStateException("No seeded household"));
         ZoneId zone = ZoneId.of(household.timezone());
         LocalDate anchor = parseAnchor(anchorIso);
-        LocalDate start = range == CalendarRange.WEEK ? anchor.with(DayOfWeek.MONDAY) : anchor;
-        LocalDate end = range == CalendarRange.WEEK ? start.plusDays(6) : anchor;
+        // Window per range. The projection loop below is range-agnostic — it iterates [start, end]
+        // and projects every event that occursOn each date — so a MONTH window naturally fans a
+        // weekly-recurring event onto each matching weekday across the whole month.
+        LocalDate start;
+        LocalDate end;
+        switch (range) {
+            case WEEK -> {
+                start = anchor.with(DayOfWeek.MONDAY);
+                end = start.plusDays(6);
+            }
+            case MONTH -> {
+                start = anchor.withDayOfMonth(1);
+                end = anchor.withDayOfMonth(anchor.lengthOfMonth());
+            }
+            default -> { // DAY
+                start = anchor;
+                end = anchor;
+            }
+        }
 
         List<HouseholdMember> members =
                 households.members(household.id()).stream()
@@ -369,6 +386,12 @@ public class HouseholdCalendarServiceImpl implements HouseholdCalendarService {
     }
 
     private static String periodLabel(CalendarRange range, LocalDate start, LocalDate end) {
+        if (range == CalendarRange.MONTH) {
+            // Full month name + year, e.g. "June 2026".
+            return start.getMonth().getDisplayName(TextStyle.FULL, Locale.ENGLISH)
+                    + " "
+                    + start.getYear();
+        }
         if (range == CalendarRange.DAY) {
             return start.getDayOfWeek().getDisplayName(TextStyle.FULL, Locale.ENGLISH)
                     + " "
