@@ -114,7 +114,7 @@ public class HouseholdCalendarServiceImpl implements HouseholdCalendarService {
                         .map(HouseholdCalendarServiceImpl::toCoverageGap)
                         .toList();
 
-        WeeklyLoadView load = computeLoad(projected, members);
+        WeeklyLoadView load = computeLoad(projected, members, range);
 
         List<ConnectedAccountView> accounts =
                 households.connectedAccounts(household.id()).stream()
@@ -298,7 +298,8 @@ public class HouseholdCalendarServiceImpl implements HouseholdCalendarService {
         return new CoverageGapView(ev.id(), label, shortLabel);
     }
 
-    private static WeeklyLoadView computeLoad(List<EventView> projected, List<HouseholdMember> members) {
+    private static WeeklyLoadView computeLoad(
+            List<EventView> projected, List<HouseholdMember> members, CalendarRange range) {
         Map<String, Integer> counts = new LinkedHashMap<>();
         Map<String, MemberView> adultViews = new LinkedHashMap<>();
         for (HouseholdMember m : members) {
@@ -340,9 +341,25 @@ public class HouseholdCalendarServiceImpl implements HouseholdCalendarService {
         }
         String summary = null;
         if (entries.size() >= 2 && entries.get(0).count() > entries.get(1).count()) {
-            summary = entries.get(0).member().displayName() + " is carrying a bit more this week.";
+            // The load is aggregated over the visible [start, end] window, so the nudge must name
+            // the window's scope (month/week/day) — never hardcode "this week" (would mislabel the
+            // month-grid load on the web's default MONTH view).
+            summary =
+                    entries.get(0).member().displayName()
+                            + " is carrying a bit more "
+                            + loadScopeNoun(range)
+                            + ".";
         }
         return new WeeklyLoadView(total, summary, entries);
+    }
+
+    /** Window-scope noun for the load nudge, matching the range the load was aggregated over. */
+    private static String loadScopeNoun(CalendarRange range) {
+        return switch (range) {
+            case MONTH -> "this month";
+            case DAY -> "today";
+            default -> "this week"; // WEEK
+        };
     }
 
     private static ConnectedAccountView toAccountView(ConnectedAccount a) {

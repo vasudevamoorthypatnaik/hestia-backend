@@ -96,6 +96,17 @@ switch and `periodLabel`. DAY/WEEK clients are untouched (adding an enum value i
 per GraphQL conventions §1.2). No DB migration, no seed change, no auth/household change. The
 projection/load/createEvent paths are range-agnostic and were reused unchanged.
 
+### ADR-2 — The "Hearth Glow" load nudge names the window's scope (not a hardcoded "this week")
+**Date:** 2026-06-27
+**Context:** `computeLoad` aggregates the responsible-event load over the visible `[start, end]`
+window, which is a whole month when `range=MONTH`. The nudge string hardcoded "…carrying a bit more
+this week.", mislabeling the month-grid load on the web's default MONTH view (PR-review HIGH finding).
+**Decision:** Pass `range` into `computeLoad` and derive the scope noun via `loadScopeNoun(range)` —
+`MONTH → "this month"`, `WEEK → "this week"`, `DAY → "today"`. The backend stays the single owner of
+the label text (the frontend renders `summaryLabel` as-is).
+**Consequences:** Pure string change; load math untouched. Verified end-to-end: a MONTH query returns
+`"… is carrying a bit more this month."` while WEEK still returns `"… this week."`.
+
 ## Test Coverage
 - `HouseholdCalendarServiceTest` (unit) — window + label per range, projection field correctness.
 - `HouseholdCalendarIT` (integration, Testcontainers + Spring GraphQL) — the query/mutation paths,
