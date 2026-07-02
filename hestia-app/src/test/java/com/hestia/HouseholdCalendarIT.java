@@ -9,6 +9,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.graphql.tester.AutoConfigureHttpGraphQlTester;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.graphql.test.tester.HttpGraphQlTester;
+import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -23,6 +24,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @AutoConfigureHttpGraphQlTester
+@ActiveProfiles("test")
 @Testcontainers
 class HouseholdCalendarIT {
 
@@ -107,6 +109,43 @@ class HouseholdCalendarIT {
                 .path("householdCalendar.load.total")
                 .entity(Integer.class)
                 .satisfies(total -> assertThat(total).isGreaterThan(0));
+    }
+
+    @Test
+    void authedMonthQueryReturnsFullMonthWindowAndLabel() {
+        // MONTH range resolves the full calendar-month window + "<Month> <Year>" label server-side
+        // (AC10); the seeded recurring events fan onto more occurrences than a single week (R11).
+        HttpGraphQlTester user = authed();
+
+        int weekEventCount =
+                user.document(CAL_QUERY)
+                        .variable("p", Map.of("anchor", "2026-06-15", "range", "WEEK"))
+                        .execute()
+                        .path("householdCalendar.events")
+                        .entityList(Object.class)
+                        .get()
+                        .size();
+
+        user.document(CAL_QUERY)
+                .variable("p", Map.of("anchor", "2026-06-15", "range", "MONTH"))
+                .execute()
+                .path("householdCalendar.period.range")
+                .entity(String.class)
+                .isEqualTo("MONTH")
+                .path("householdCalendar.period.start")
+                .entity(String.class)
+                .isEqualTo("2026-06-01")
+                .path("householdCalendar.period.end")
+                .entity(String.class)
+                .isEqualTo("2026-06-30")
+                .path("householdCalendar.period.label")
+                .entity(String.class)
+                .isEqualTo("June 2026")
+                .path("householdCalendar.events")
+                .entityList(Object.class)
+                .satisfies(
+                        monthEvents ->
+                                assertThat(monthEvents.size()).isGreaterThanOrEqualTo(weekEventCount));
     }
 
     @Test

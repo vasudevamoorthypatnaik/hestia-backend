@@ -113,6 +113,58 @@ class HouseholdCalendarServiceTest {
     }
 
     @Test
+    void weekLoadSummaryNounScopesToThisWeek() {
+        // The load nudge is aggregated over the visible window, so for a WEEK range it must read
+        // "this week" (regression guard for the range-scoped loadScopeNoun fix).
+        when(events.findByHousehold(HH))
+                .thenReturn(
+                        List.of(
+                                recurring(1, "A", 540, null, PALLAVI, MAYA, false),
+                                recurring(2, "B", 540, null, VASU, MAYA, false),
+                                recurring(3, "C", 540, null, VASU, MAYA, false)));
+        when(households.connectedAccounts(HH)).thenReturn(List.of());
+
+        HouseholdCalendarView view = service.getCalendar("2026-06-24", CalendarRange.WEEK);
+
+        assertThat(view.load().summaryLabel()).isEqualTo("Vasu is carrying a bit more this week.");
+    }
+
+    @Test
+    void monthLoadSummaryNounScopesToThisMonth() {
+        // Over a MONTH window the same nudge must read "this month" — never the hardcoded "this week"
+        // that mislabeled the web month-grid's load (PR-review f_ld1a2b regression guard).
+        when(events.findByHousehold(HH))
+                .thenReturn(
+                        List.of(
+                                recurring(1, "A", 540, null, PALLAVI, MAYA, false),
+                                recurring(2, "B", 540, null, VASU, MAYA, false),
+                                recurring(4, "C", 540, null, VASU, MAYA, false)));
+        when(households.connectedAccounts(HH)).thenReturn(List.of());
+
+        // June 2026: Vasu carries Tuesdays + Thursdays (9 instances) vs Pallavi's Mondays (5).
+        HouseholdCalendarView view = service.getCalendar("2026-06-15", CalendarRange.MONTH);
+
+        assertThat(view.load().summaryLabel()).isEqualTo("Vasu is carrying a bit more this month.");
+    }
+
+    @Test
+    void dayLoadSummaryNounScopesToToday() {
+        // Over a single DAY window the nudge must read "today".
+        when(events.findByHousehold(HH))
+                .thenReturn(
+                        List.of(
+                                recurring(4, "A", 540, null, PALLAVI, MAYA, false),
+                                recurring(4, "B", 600, null, VASU, MAYA, false),
+                                recurring(4, "C", 660, null, VASU, MAYA, false)));
+        when(households.connectedAccounts(HH)).thenReturn(List.of());
+
+        // 2026-06-25 is a Thursday; all three events land on that one day (Vasu 2, Pallavi 1).
+        HouseholdCalendarView view = service.getCalendar("2026-06-25", CalendarRange.DAY);
+
+        assertThat(view.load().summaryLabel()).isEqualTo("Vasu is carrying a bit more today.");
+    }
+
+    @Test
     void dayRangeReturnsOnlyThatDay() {
         when(events.findByHousehold(HH))
                 .thenReturn(
@@ -240,6 +292,51 @@ class HouseholdCalendarServiceTest {
                                                 List.of(MAYA), null, false, null)))
                 .isInstanceOf(InvalidEventException.class)
                 .hasMessageContaining("End time");
+    }
+
+    @Test
+    void monthRangeWindowSpansFirstThroughLastDayWithMonthLabel() {
+        when(events.findByHousehold(HH)).thenReturn(List.of());
+        when(households.connectedAccounts(HH)).thenReturn(List.of());
+
+        // anchor mid-month; service resolves the full calendar month window.
+        HouseholdCalendarView view = service.getCalendar("2026-06-15", CalendarRange.MONTH);
+
+        assertThat(view.period().start()).isEqualTo("2026-06-01"); // first day
+        assertThat(view.period().end()).isEqualTo("2026-06-30"); // last day
+        assertThat(view.period().label()).isEqualTo("June 2026");
+    }
+
+    @Test
+    void monthRangeWindowEndClampsToShortMonth() {
+        when(events.findByHousehold(HH)).thenReturn(List.of());
+        when(households.connectedAccounts(HH)).thenReturn(List.of());
+
+        // February 2026 is a non-leap month — the window must end on the 28th, not spill over.
+        HouseholdCalendarView view = service.getCalendar("2026-02-10", CalendarRange.MONTH);
+
+        assertThat(view.period().start()).isEqualTo("2026-02-01");
+        assertThat(view.period().end()).isEqualTo("2026-02-28");
+        assertThat(view.period().label()).isEqualTo("February 2026");
+    }
+
+    @Test
+    void monthRangeFansWeeklyRecurringEventOntoEveryMatchingWeekday() {
+        // A Tuesday-recurring event must project onto every Tuesday in the month (R11): the
+        // projection loop is range-agnostic, so a MONTH window fans one weekly event across ~4–5
+        // concrete dates rather than collapsing to a single week.
+        when(events.findByHousehold(HH))
+                .thenReturn(List.of(recurring(2, "Soccer — Maya", 960, 1050, VASU, MAYA, true)));
+        when(households.connectedAccounts(HH)).thenReturn(List.of());
+
+        HouseholdCalendarView view = service.getCalendar("2026-06-15", CalendarRange.MONTH);
+
+        // June 2026 Tuesdays: 2, 9, 16, 23, 30 -> five projected instances on distinct dates.
+        assertThat(view.events())
+                .extracting(EventView::date)
+                .containsExactly(
+                        "2026-06-02", "2026-06-09", "2026-06-16", "2026-06-23", "2026-06-30");
+        assertThat(view.events()).allSatisfy(e -> assertThat(e.title()).isEqualTo("Soccer — Maya"));
     }
 
     @Test

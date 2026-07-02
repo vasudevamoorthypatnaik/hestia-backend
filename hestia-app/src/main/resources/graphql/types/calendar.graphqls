@@ -15,10 +15,11 @@ type HouseholdCalendar {
 enum CalendarRange {
   DAY
   WEEK
+  MONTH
 }
 
 type CalendarPeriod {
-  "DAY or WEEK."
+  "DAY, WEEK, or MONTH."
   range: CalendarRange!
   "ISO date (yyyy-MM-dd) of the first day in the window."
   start: String!
